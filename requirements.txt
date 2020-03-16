@@ -1,0 +1,5 @@
+sacrebleu
+pytorch-nlp
+torch
+nltk
+numpy
