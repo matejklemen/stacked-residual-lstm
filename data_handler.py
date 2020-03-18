@@ -11,6 +11,7 @@ dev_name = "captions_val2014.json"
 
 train_path = os.path.join(DATA_DIR, train_name)
 dev_path = os.path.join(DATA_DIR, dev_name)
+np.random.seed(1)
 
 
 def load_vocab(path):
@@ -71,7 +72,7 @@ def mscoco_training_set():
     return dataset
 
 
-# 5000 images x4 captions, random
+# 5000 images x4 test examples, random
 def mscoco_test_set_1(include_self_ref=False):
     dataset, refs = [], []
     id2caption = read_image_annotations(dev_path)
@@ -81,54 +82,44 @@ def mscoco_test_set_1(include_self_ref=False):
     all_captions = list(id2caption.items())
     for idx in indices:
         img_id, captions = all_captions[idx]
-        chosen_captions = np.random.choice(captions, size=4,
+        chosen_captions = np.random.choice(captions, size=5,
                                            replace=False).tolist()
         chosen_captions = list(map(preprocess, chosen_captions))
-        src1, src2 = chosen_captions[0], chosen_captions[1]
-        tgt1, tgt2 = chosen_captions[2], chosen_captions[3]
+        cap1, cap2, cap3, cap4, cap5 = chosen_captions
 
-        dataset.append([src1, tgt1])
-        dataset.append([tgt1, src1])
-        dataset.append([src2, tgt2])
-        dataset.append([tgt2, src2])
+        dataset.append([cap1, cap2])
+        dataset.append([cap2, cap1])
+        dataset.append([cap3, cap4])
+        dataset.append([cap4, cap3])
 
-        # 3/4 refs for src1
-        refs.append([src1, tgt1, src2, tgt2] if include_self_ref else [tgt1, src2, tgt2])
-        # 3/4 refs for tgt1
-        refs.append([tgt1, src1, src2, tgt2] if include_self_ref else [src1, src2, tgt2])
-        # 3/4 refs for src2
-        refs.append([src2, src1, tgt1, tgt2] if include_self_ref else [src1, tgt1, tgt2])
-        # 3/4 refs for tgt2
-        refs.append([tgt2, src1, tgt1, src2] if include_self_ref else [src1, tgt1, src2])
+        # 4 or 5 refs (if including self-ref) per test example
+        refs.append([cap1, cap2, cap3, cap4, cap5] if include_self_ref else [cap2, cap3, cap4, cap5])
+        refs.append([cap2, cap1, cap3, cap4, cap5] if include_self_ref else [cap1, cap3, cap4, cap5])
+        refs.append([cap3, cap1, cap2, cap4, cap5] if include_self_ref else [cap1, cap2, cap4, cap5])
+        refs.append([cap4, cap1, cap2, cap3, cap5] if include_self_ref else [cap1, cap2, cap3, cap5])
 
     return dataset, refs
 
 
-# 5000 images x4 captions, first 5000
+# 4 or 5 refs (if including self-ref) per test example
 def mscoco_test_set_2(include_self_ref=False):
     dataset, refs = [], []
     id2caption = read_image_annotations(dev_path)
     all_captions = list(id2caption.items())
     for img_id, captions in all_captions[: 5_000]:
-        chosen_captions = np.random.choice(captions, size=4,
-                                           replace=False).tolist()
+        chosen_captions = np.random.choice(captions, size=5, replace=False).tolist()
         chosen_captions = list(map(preprocess, chosen_captions))
-        src1, src2 = chosen_captions[0], chosen_captions[1]
-        tgt1, tgt2 = chosen_captions[2], chosen_captions[3]
+        cap1, cap2, cap3, cap4, cap5 = chosen_captions
 
-        dataset.append([src1, tgt1])
-        dataset.append([tgt1, src1])
-        dataset.append([src2, tgt2])
-        dataset.append([tgt2, src2])
+        dataset.append([cap1, cap2])
+        dataset.append([cap2, cap1])
+        dataset.append([cap3, cap4])
+        dataset.append([cap4, cap3])
 
-        # 3/4 refs for src1
-        refs.append([src1, tgt1, src2, tgt2] if include_self_ref else [tgt1, src2, tgt2])
-        # 3/4 refs for tgt1
-        refs.append([tgt1, src1, src2, tgt2] if include_self_ref else [src1, src2, tgt2])
-        # 3/4 refs for src2
-        refs.append([src2, src1, tgt1, tgt2] if include_self_ref else [src1, tgt1, tgt2])
-        # 3/4 refs for tgt2
-        refs.append([tgt2, src1, tgt1, src2] if include_self_ref else [src1, tgt1, src2])
+        refs.append([cap1, cap2, cap3, cap4, cap5] if include_self_ref else [cap2, cap3, cap4, cap5])
+        refs.append([cap2, cap1, cap3, cap4, cap5] if include_self_ref else [cap1, cap3, cap4, cap5])
+        refs.append([cap3, cap1, cap2, cap4, cap5] if include_self_ref else [cap1, cap2, cap4, cap5])
+        refs.append([cap4, cap1, cap2, cap3, cap5] if include_self_ref else [cap1, cap2, cap3, cap5])
 
     return dataset, refs
 
@@ -138,48 +129,17 @@ def mscoco_test_set_3(include_self_ref=False):
     dataset, refs = [], []
     id2caption = read_image_annotations(dev_path)
 
-    indices = np.random.choice(np.arange(len(id2caption)), size=20_000,
-                               replace=False)
+    indices = np.random.choice(np.arange(len(id2caption)), size=20_000, replace=False)
     all_captions = list(id2caption.items())
     for idx in indices:
         img_id, captions = all_captions[idx]
-        chosen_captions = np.random.choice(captions, size=4,
-                                           replace=False).tolist()
+        chosen_captions = np.random.choice(captions, size=5, replace=False).tolist()
         chosen_captions = list(map(preprocess, chosen_captions))
-        src1, src2 = chosen_captions[0], chosen_captions[1]
-        tgt1, tgt2 = chosen_captions[2], chosen_captions[3]
+        cap1, cap2, cap3, cap4, cap5 = chosen_captions
 
-        dataset.append([src1, tgt1])
-        # 3/4 refs for src1
-        refs.append([src1, tgt1, src2, tgt2] if include_self_ref else [tgt1, src2, tgt2])
+        dataset.append([cap1, cap2])
 
-    return dataset, refs
-
-
-# all images x4 captions?
-def mscoco_test_set_4(include_self_ref=False):
-    dataset, refs = [], []
-    id2caption = read_image_annotations(dev_path)
-    for img_id, captions in id2caption.items():
-        chosen_captions = np.random.choice(captions, size=4, replace=False).tolist()
-        chosen_captions = list(map(preprocess, chosen_captions))
-
-        src1, src2 = chosen_captions[0], chosen_captions[1]
-        tgt1, tgt2 = chosen_captions[2], chosen_captions[3]
-
-        dataset.append([src1, tgt1])
-        dataset.append([tgt1, src1])
-        dataset.append([src2, tgt2])
-        dataset.append([tgt2, src2])
-
-        # 3 refs for src1
-        refs.append([src1, tgt1, src2, tgt2] if include_self_ref else [tgt1, src2, tgt2])
-        # 3 refs for tgt1
-        refs.append([tgt1, src1, src2, tgt2] if include_self_ref else [src1, src2, tgt2])
-        # 3 refs for src2
-        refs.append([src2, src1, tgt1, tgt2] if include_self_ref else [src1, tgt1, tgt2])
-        # 3 refs for tgt2
-        refs.append([tgt2, src1, tgt1, src2] if include_self_ref else [src1, tgt1, src2])
+        refs.append([cap1, cap2, cap3, cap4, cap5] if include_self_ref else [cap2, cap3, cap4, cap5])
 
     return dataset, refs
 
@@ -191,5 +151,3 @@ if __name__ == "__main__":
     assert len(res) == 20_000
     res, _ = mscoco_test_set_3()
     assert len(res) == 20_000
-    res, _ = mscoco_test_set_4()
-    assert len(res) == 162_016
