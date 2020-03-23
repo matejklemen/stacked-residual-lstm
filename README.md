@@ -1,15 +1,16 @@
 # Overview
 This repository contains the implementation of stacked residual LSTM seq2seq architecture 
 with focus on paraphrase generation. The hope was to reproduce **Neural Paraphrase Generation with Stacked Residual LSTM Networks (Prakash et al., 2016)**, 
-but I am not able to obtain the same results on MSCOCO as many things are ambiguously defined
+but I am not able to obtain the same results on MSCOCO as many things are ambiguously defined.
 
 Besides the main model type, the implementation can also be used for other various combinations of bidirectional LSTM, 
-LSTM with attention, stacking LSTM and residual LSTM.
+LSTM with attention, stacked LSTM and residual LSTM.
 
 
 TODO:
 - improve overall code style + usability of the project  
-- add obtained results on COCO for a few models 
+- add obtained results on COCO for a few models  
+- argparse  
 
 # Usage
 
