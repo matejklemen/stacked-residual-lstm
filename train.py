@@ -6,16 +6,9 @@ import os
 from time import time
 from random import random
 
-from data_handler import load_vocab, mscoco_training_set
+from data_handler import load_vocab, load_pairs
 from seq2seq import ResidualLSTMEncoder, ResidualLSTMDecoder
-from util import trim, encode_sequence, pad, greedy_decode
-
-DATA_DIR = "data/mscoco"
-train_name = "captions_train2014.json"
-dev_name = "captions_val2014.json"
-
-train_path = os.path.join(DATA_DIR, train_name)
-dev_path = os.path.join(DATA_DIR, dev_name)
+from util import encode_seq2seq, greedy_decode
 
 
 class PerplexityLoss(nn.CrossEntropyLoss):
@@ -47,49 +40,86 @@ def debug_preds(preds_tensor, id2tok):
         print("")
 
 
+# A common train/dev function for running a single batch through the seq2seq model
+def train_batch(batch_source, batch_target,
+                enc_model, dec_model,
+                enc_optimizer, dec_optimizer,
+                teacher_forcing_proba, eval_mode=False):
+    enc_optimizer.zero_grad()
+    dec_optimizer.zero_grad()
+
+    curr_batch_size = batch_source.shape[0]
+    last_lay_hids, (last_t_hids, last_t_cells) = enc_model(batch_source)
+
+    curr_input = torch.tensor([[tok2id["<BOS>"]] for _ in range(curr_batch_size)],
+                              dtype=torch.long, device=batch_source.device)
+    curr_hids, curr_cells = last_t_hids, last_t_cells
+
+    this_batch_logits = []
+    use_teacher_forcing = random() < teacher_forcing_proba
+    for dec_step in range(MAX_SEQ_LEN):
+        logits, curr_hids, curr_cells = dec_model(curr_input,
+                                                  enc_hidden=last_lay_hids,
+                                                  dec_hiddens=curr_hids,
+                                                  dec_cells=curr_cells)
+        this_batch_logits.append(logits[:, 0, :].unsqueeze(2))
+        curr_preds = greedy_decode(logits)
+
+        if use_teacher_forcing:
+            curr_input = batch_target[:, dec_step].unsqueeze(1)
+        else:
+            curr_input = curr_preds
+
+    batch_loss = loss_fn(torch.cat(this_batch_logits, dim=2), batch_target)
+    if not eval_mode:
+        batch_loss.backward()
+        torch.nn.utils.clip_grad_norm_(enc_model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(dec_model.parameters(), 1.0)
+        enc_optimizer.step()
+        dec_optimizer.step()
+
+    return float(batch_loss)
+
+
 if __name__ == "__main__":
     MAX_SEQ_LEN = 20
-    NUM_EPOCHS = 10
+    NUM_EPOCHS = 30
     BATCH_SIZE = 256
     LOG_EVERY_N_BATCHES = 100
     TEACHER_FORCING_PROBA = 1.0
     assert BATCH_SIZE > 1
 
+    DATA_DIR = "data/mscoco"
+    MODEL_NAME = "4_layer_res13_attn1_lstm"
+    model_save_dir = os.path.join(DATA_DIR, MODEL_NAME)
+    if not os.path.exists(model_save_dir):
+        os.makedirs(model_save_dir)
+
     torch.manual_seed(1)
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    print(f"Using device {device}")
+    print(f"**Using device {device}**")
 
-    raw_train_set = mscoco_training_set()
-    # TODO: provide a script to generate vocabulary
+    raw_train_set = load_pairs(src_path=os.path.join(DATA_DIR, "train_set", "train_src.txt"),
+                               tgt_path=os.path.join(DATA_DIR, "train_set", "train_dst.txt"))
+    raw_dev_set = load_pairs(src_path=os.path.join(DATA_DIR, "dev_set", "dev_src.txt"),
+                             tgt_path=os.path.join(DATA_DIR, "dev_set", "dev_dst.txt"))
     tok2id, id2tok = load_vocab(os.path.join(DATA_DIR, "vocab.txt"))
-    encoded_input, encoded_target = [], []
+    print(f"**{len(raw_train_set)} train examples, {len(raw_dev_set)} dev examples, vocab = {len(tok2id)} tokens**")
 
-    for curr_src, curr_tgt in raw_train_set:
-        # source: <BOS> + sequence + <EOS>
-        src = pad([tok2id["<BOS>"]] + trim(encode_sequence(curr_src, tok2id), MAX_SEQ_LEN - 2) + [tok2id["<EOS>"]],
-                  max_len=MAX_SEQ_LEN, pad_token=tok2id["<PAD>"])
-        encoded_input.append(src)
-
-        # target: sequence + <EOS>
-        tgt = pad(trim(encode_sequence(curr_tgt, tok2id), MAX_SEQ_LEN - 1) + [tok2id["<EOS>"]],
-                  max_len=MAX_SEQ_LEN, pad_token=tok2id["<PAD>"])
-        encoded_target.append(tgt)
-
-    encoded_input = torch.tensor(encoded_input, dtype=torch.long)
-    encoded_target = torch.tensor(encoded_target, dtype=torch.long)
+    train_input, train_target = encode_seq2seq(raw_train_set, tok2id, MAX_SEQ_LEN)
+    dev_input, dev_target = encode_seq2seq(raw_dev_set, tok2id, MAX_SEQ_LEN)
 
     enc_model = ResidualLSTMEncoder(vocab_size=len(tok2id),
-                                    num_layers=4, residual_layers=None,
+                                    num_layers=4, residual_layers=[1, 3],
                                     inp_hid_size=512,
-                                    dropout=0.5)
+                                    dropout=0.5,
+                                    bidirectional=False).to(device)
     dec_model = ResidualLSTMDecoder(vocab_size=len(tok2id),
-                                    num_layers=4, residual_layers=None,
+                                    num_layers=4, residual_layers=[1, 3],
                                     inp_size=512,
                                     hid_size=512,
                                     dropout=0.5,
-                                    num_attn_layers=0)
-    enc_model.to(device)
-    dec_model.to(device)
+                                    num_attn_layers=1).to(device)
 
     # SGD, learning rate = 1.0, halved after every 3rd epoch, trained for 10 epochs
     enc_optimizer = optim.SGD(enc_model.parameters(), lr=1.0)
@@ -98,76 +128,62 @@ if __name__ == "__main__":
     dec_scheduler = optim.lr_scheduler.StepLR(dec_optimizer, step_size=3, gamma=0.5)
     loss_fn = PerplexityLoss(ignore_index=tok2id["<PAD>"])
 
-    num_examples = encoded_input.shape[0]
-    batches_per_epoch = (num_examples + BATCH_SIZE - 1) // BATCH_SIZE
-    print(f"**{num_examples} examples, batch_size={BATCH_SIZE}, {batches_per_epoch} batches/epoch**")
+    best_dev_loss, best_epoch = float("inf"), None
+    num_train, num_dev = train_input.shape[0], dev_input.shape[0]
+    train_batches = (num_train + BATCH_SIZE - 1) // BATCH_SIZE
+    dev_batches = (num_dev + BATCH_SIZE - 1) // BATCH_SIZE
+    print(f"**{num_train} train examples, {num_dev} dev examples, "
+          f"batch_size={BATCH_SIZE}, {train_batches} train batches/epoch**")
 
     t_start = time()
     for idx_epoch in range(NUM_EPOCHS):
         log_lr(1 + idx_epoch, enc_optimizer, dec_optimizer)
-        train_loss = 0.0
-        shuffle_idx = torch.randperm(num_examples).to(device)
-        num_batches_considered = 0
+        num_batches_considered, train_loss = 0, 0.0
+        shuffle_idx = torch.randperm(num_train).to(device)
 
         enc_model.train()
         dec_model.train()
-        for idx_batch in range(batches_per_epoch):
-            enc_optimizer.zero_grad()
-            dec_optimizer.zero_grad()
-
+        for idx_batch in range(train_batches):
             start, end = idx_batch * BATCH_SIZE, (idx_batch + 1) * BATCH_SIZE
             curr_indices = shuffle_idx[start: end]
-            # this is needed to handle leftovers (not full batch)
-            curr_batch_size = curr_indices.shape[0]
+            curr_batch_size = curr_indices.shape[0]  # in case of partial batches
             num_batches_considered += curr_batch_size / BATCH_SIZE
+            curr_src = train_input[curr_indices].to(device)
+            curr_tgt = train_target[curr_indices].to(device)
 
-            curr_src = encoded_input[curr_indices].to(device)
-            curr_tgt = encoded_target[curr_indices].to(device)
+            train_loss += train_batch(curr_src, curr_tgt, enc_model, dec_model, enc_optimizer, dec_optimizer,
+                                      teacher_forcing_proba=TEACHER_FORCING_PROBA)
 
-            last_lay_hids, (last_t_hids, last_t_cells) = enc_model(curr_src)
-
-            curr_input = torch.tensor([[tok2id["<BOS>"]] for _ in range(curr_batch_size)],
-                                      dtype=torch.long, device=device)
-            curr_hids, curr_cells = last_t_hids, last_t_cells
-
-            this_batch_logits = []
-            batch_preds = torch.zeros((curr_batch_size, MAX_SEQ_LEN), dtype=torch.long)
-            batch_preds[:] = tok2id["<PAD>"]
-
-            use_teacher_forcing = random() < TEACHER_FORCING_PROBA
-            for dec_step in range(MAX_SEQ_LEN):
-                logits, curr_hids, curr_cells = dec_model(curr_input,
-                                                          enc_hidden=last_lay_hids,
-                                                          dec_hiddens=curr_hids,
-                                                          dec_cells=curr_cells)
-                this_batch_logits.append(logits[:, 0, :].unsqueeze(2))
-                curr_preds = greedy_decode(logits)
-                batch_preds[:, dec_step] = curr_preds.detach().squeeze(1)
-
-                if use_teacher_forcing:
-                    curr_input = curr_tgt[:, dec_step].unsqueeze(1)
-                else:
-                    curr_input = curr_preds
-
-            batch_loss = loss_fn(torch.cat(this_batch_logits, dim=2), curr_tgt)
-            train_loss += float(batch_loss)
             if (1 + idx_batch) % LOG_EVERY_N_BATCHES == 0:
                 print(f"**Batch #{1 + idx_batch}: train_loss={train_loss / num_batches_considered:.4f}**")
-
-            if (1 + idx_batch) % 100 == 0:
-                debug_preds(batch_preds, id2tok)
-
-            batch_loss.backward()
-            torch.nn.utils.clip_grad_norm_(enc_model.parameters(), 1.0)
-            torch.nn.utils.clip_grad_norm_(dec_model.parameters(), 1.0)
-            enc_optimizer.step()
-            dec_optimizer.step()
 
         print(f"**Epoch #{1 + idx_epoch}: train_loss={train_loss / num_batches_considered:.4f}**")
         enc_scheduler.step()
         dec_scheduler.step()
-    print(f"**Training took {time() - t_start}s**")
 
-    torch.save(enc_model.state_dict(), os.path.join(DATA_DIR, f"4_layer_base_lstm_enc.pt"))
-    torch.save(dec_model.state_dict(), os.path.join(DATA_DIR, f"4_layer_base_lstm_dec.pt"))
-    print(f"Saved model to {DATA_DIR}!")
+        dev_loss, dev_batches_considered = 0.0, 0
+        # Evaluation on dev set after each epoch
+        with torch.no_grad():
+            enc_model.eval()
+            dec_model.eval()
+            for idx_batch in range(dev_batches):
+                start, end = idx_batch * BATCH_SIZE, (idx_batch + 1) * BATCH_SIZE
+                curr_src = dev_input[start: end].to(device)
+                curr_tgt = dev_target[start: end].to(device)
+                curr_batch_size = curr_src.shape[0]  # in case of partial batches
+                dev_batches_considered += curr_batch_size / BATCH_SIZE
+
+                dev_loss += train_batch(curr_src, curr_tgt, enc_model, dec_model, enc_optimizer, dec_optimizer,
+                                        teacher_forcing_proba=TEACHER_FORCING_PROBA if TEACHER_FORCING_PROBA > (1.0 - 1e-5) else 0.0,
+                                        eval_mode=True)
+
+        curr_dev_loss = dev_loss / dev_batches_considered
+        print(f"**Epoch #{1 + idx_epoch}: dev_loss={curr_dev_loss:.4f}**")
+        if curr_dev_loss < best_dev_loss:
+            print(f"**Saving new best model state to '{model_save_dir}'**")
+            best_dev_loss, best_epoch = curr_dev_loss, idx_epoch
+            torch.save(enc_model.state_dict(), os.path.join(model_save_dir, "enc.pt"))
+            torch.save(dec_model.state_dict(), os.path.join(model_save_dir, "dec.pt"))
+
+    print(f"**Best state was after epoch {1 + best_epoch}: loss = {best_dev_loss}**")
+    print(f"**Training took {time() - t_start}s**")
