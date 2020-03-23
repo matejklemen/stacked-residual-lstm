@@ -2,17 +2,10 @@ import os
 import json
 import numpy as np
 from nltk.tokenize import word_tokenize
+from collections import Counter
 
 PAD, BOS, EOS, UNK = 0, 1, 2, 3
 MAX_TOKENS = 15
-
-# TODO: move this inside if __name__ == "__main__"
-DATA_DIR = "data/mscoco"
-train_name = "captions_train2014.json"
-dev_name = "captions_val2014.json"
-
-train_path = os.path.join(DATA_DIR, train_name)
-dev_path = os.path.join(DATA_DIR, dev_name)
 np.random.seed(1)
 
 
@@ -67,12 +60,22 @@ def read_image_annotations(path):
     return id2caption
 
 
-def mscoco_training_set():
+def mscoco_training_set(train_path, n_most_common=30_000):
+    token_counter = Counter()
+    tok2id, id2tok = {}, {}
+    # Fixed special tokens
+    for idx, token in [(PAD, "<PAD>"), (BOS, "<BOS>"), (EOS, "<EOS>"), (UNK, "<UNK>")]:
+        tok2id[token] = idx
+        id2tok[idx] = token
+
     dataset = []
     id2caption = read_image_annotations(train_path)
     for img_id, captions in id2caption.items():
         chosen_captions = np.random.choice(captions, size=4, replace=False).tolist()
         chosen_captions = list(map(preprocess, chosen_captions))
+        # Count tokens only in the chosen (preprocessed) captions
+        for curr_cap in chosen_captions:
+            token_counter += Counter(curr_cap)
 
         src1, src2 = chosen_captions[0], chosen_captions[1]
         tgt1, tgt2 = chosen_captions[2], chosen_captions[3]
@@ -82,19 +85,23 @@ def mscoco_training_set():
         dataset.append([src2, tgt2])
         dataset.append([tgt2, src2])
 
-    return dataset
+    for curr_token, _ in token_counter.most_common(n_most_common):
+        tok2id[curr_token] = len(tok2id)
+        id2tok[len(id2tok)] = curr_token
+
+    return dataset, (tok2id, id2tok)
 
 
-def mscoco_test_set(include_self_ref=False):
+def mscoco_test_set(test_path, include_self_ref=False):
     dev_size, test_size = 20_000, 20_000
     dev_dataset, dev_refs = [], []
     test_dataset, test_refs = [], []
-    id2caption = read_image_annotations(dev_path)
+    id2caption = read_image_annotations(test_path)
     assert len(id2caption) >= dev_size + test_size
 
     # Randomly select 20k images for each of dev and test set (non-overlapping) and create a
     # (1.) source-target pair (for loss-evaluation) and
-    # (2.) source-references (for BLEU/METEOR/... evaluation)
+    # (2.) references (for BLEU/METEOR/... evaluation)
     indices = np.random.choice(np.arange(len(id2caption)), size=(dev_size + test_size), replace=False)
     all_captions = list(id2caption.items())
     for idx in indices[: dev_size]:
@@ -119,18 +126,30 @@ def mscoco_test_set(include_self_ref=False):
 
 
 if __name__ == "__main__":
+    DATA_DIR = "data/mscoco"
+    train_name = "captions_train2014.json"
+    dev_name = "captions_val2014.json"
+
+    train_path = os.path.join(DATA_DIR, train_name)
+    dev_path = os.path.join(DATA_DIR, dev_name)
+
     train_dir = os.path.join(DATA_DIR, "train_set")
     if not os.path.exists(train_dir):
         os.makedirs(train_dir)
 
-    # TODO: utility for obtaining & writing vocabulary of training set
-    raw_train_set = mscoco_training_set()
+    raw_train_set, (tok2id, _) = mscoco_training_set(train_path)
     with open(os.path.join(train_dir, "train_src.txt"), "w") as f_src, \
             open(os.path.join(train_dir, "train_dst.txt"), "w") as f_dst:
         for curr_src, curr_tgt in raw_train_set:
             print(" ".join(curr_src), file=f_src)
             print(" ".join(curr_tgt), file=f_dst)
     print(f"**Wrote {len(raw_train_set)} train examples to '{train_dir}'**")
+
+    # Write vocabulary (sorted by mapping index) to file
+    with open(os.path.join(DATA_DIR, "vocab.txt"), "w") as f_src:
+        for token, _ in sorted(tok2id.items(), key=lambda tup: tup[1]):
+            print(token, file=f_src)
+    print(f"**Wrote vocabulary ({len(tok2id)}) to '{DATA_DIR}'**")
 
     dev_dir = os.path.join(DATA_DIR, "dev_set")
     if not os.path.exists(dev_dir):
@@ -141,7 +160,7 @@ if __name__ == "__main__":
         os.makedirs(test_dir)
 
     # NOTE: Self-reference is always placed as reference#0
-    (raw_dev_set, _), (raw_test_set, test_refs) = mscoco_test_set(include_self_ref=True)
+    (raw_dev_set, _), (raw_test_set, test_refs) = mscoco_test_set(dev_path, include_self_ref=True)
 
     with open(os.path.join(dev_dir, "dev_src.txt"), "w") as f_src, \
             open(os.path.join(dev_dir, "dev_dst.txt"), "w") as f_dst:
