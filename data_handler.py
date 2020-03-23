@@ -5,6 +5,8 @@ from nltk.tokenize import word_tokenize
 
 PAD, BOS, EOS, UNK = 0, 1, 2, 3
 MAX_TOKENS = 15
+
+# TODO: move this inside if __name__ == "__main__"
 DATA_DIR = "data/mscoco"
 train_name = "captions_train2014.json"
 dev_name = "captions_val2014.json"
@@ -32,13 +34,24 @@ def load_vocab(path):
     return tok2id, id2tok
 
 
+# Load and tokenize [source, target] pairs by path
+def load_pairs(src_path, tgt_path):
+    pairs = []
+    with open(src_path) as f_src, open(tgt_path) as f_tgt:
+        for curr_src in f_src:
+            processed_src = curr_src.strip().split(" ")
+            processed_tgt = f_tgt.readline().strip().split(" ")
+            pairs.append([processed_src, processed_tgt])
+    return pairs
+
+
 def preprocess(seq):
     seq = seq.lower().replace(".", "").strip().replace("\n", " ")
     return word_tokenize(seq)[:MAX_TOKENS]
 
 
 def read_image_annotations(path):
-    # path... str (path to train or val .json file)
+    # path... str (path to captions_train2014.json or captions_val2014.json file)
     with open(path) as f:
         data = json.load(f)
 
@@ -72,82 +85,84 @@ def mscoco_training_set():
     return dataset
 
 
-# 5000 images x4 test examples, random
-def mscoco_test_set_1(include_self_ref=False):
-    dataset, refs = [], []
+def mscoco_test_set(include_self_ref=False):
+    dev_size, test_size = 20_000, 20_000
+    dev_dataset, dev_refs = [], []
+    test_dataset, test_refs = [], []
     id2caption = read_image_annotations(dev_path)
+    assert len(id2caption) >= dev_size + test_size
 
-    indices = np.random.choice(np.arange(len(id2caption)), size=5_000,
-                               replace=False)
+    # Randomly select 20k images for each of dev and test set (non-overlapping) and create a
+    # (1.) source-target pair (for loss-evaluation) and
+    # (2.) source-references (for BLEU/METEOR/... evaluation)
+    indices = np.random.choice(np.arange(len(id2caption)), size=(dev_size + test_size), replace=False)
     all_captions = list(id2caption.items())
-    for idx in indices:
-        img_id, captions = all_captions[idx]
-        chosen_captions = np.random.choice(captions, size=5,
-                                           replace=False).tolist()
-        chosen_captions = list(map(preprocess, chosen_captions))
-        cap1, cap2, cap3, cap4, cap5 = chosen_captions
-
-        dataset.append([cap1, cap2])
-        dataset.append([cap2, cap1])
-        dataset.append([cap3, cap4])
-        dataset.append([cap4, cap3])
-
-        # 4 or 5 refs (if including self-ref) per test example
-        refs.append([cap1, cap2, cap3, cap4, cap5] if include_self_ref else [cap2, cap3, cap4, cap5])
-        refs.append([cap2, cap1, cap3, cap4, cap5] if include_self_ref else [cap1, cap3, cap4, cap5])
-        refs.append([cap3, cap1, cap2, cap4, cap5] if include_self_ref else [cap1, cap2, cap4, cap5])
-        refs.append([cap4, cap1, cap2, cap3, cap5] if include_self_ref else [cap1, cap2, cap3, cap5])
-
-    return dataset, refs
-
-
-# 4 or 5 refs (if including self-ref) per test example
-def mscoco_test_set_2(include_self_ref=False):
-    dataset, refs = [], []
-    id2caption = read_image_annotations(dev_path)
-    all_captions = list(id2caption.items())
-    for img_id, captions in all_captions[: 5_000]:
-        chosen_captions = np.random.choice(captions, size=5, replace=False).tolist()
-        chosen_captions = list(map(preprocess, chosen_captions))
-        cap1, cap2, cap3, cap4, cap5 = chosen_captions
-
-        dataset.append([cap1, cap2])
-        dataset.append([cap2, cap1])
-        dataset.append([cap3, cap4])
-        dataset.append([cap4, cap3])
-
-        refs.append([cap1, cap2, cap3, cap4, cap5] if include_self_ref else [cap2, cap3, cap4, cap5])
-        refs.append([cap2, cap1, cap3, cap4, cap5] if include_self_ref else [cap1, cap3, cap4, cap5])
-        refs.append([cap3, cap1, cap2, cap4, cap5] if include_self_ref else [cap1, cap2, cap4, cap5])
-        refs.append([cap4, cap1, cap2, cap3, cap5] if include_self_ref else [cap1, cap2, cap3, cap5])
-
-    return dataset, refs
-
-
-# 20000 images x1 caption
-def mscoco_test_set_3(include_self_ref=False):
-    dataset, refs = [], []
-    id2caption = read_image_annotations(dev_path)
-
-    indices = np.random.choice(np.arange(len(id2caption)), size=20_000, replace=False)
-    all_captions = list(id2caption.items())
-    for idx in indices:
+    for idx in indices[: dev_size]:
         img_id, captions = all_captions[idx]
         chosen_captions = np.random.choice(captions, size=5, replace=False).tolist()
         chosen_captions = list(map(preprocess, chosen_captions))
         cap1, cap2, cap3, cap4, cap5 = chosen_captions
 
-        dataset.append([cap1, cap2])
+        dev_dataset.append([cap1, cap2])
+        dev_refs.append([cap1, cap2, cap3, cap4, cap5] if include_self_ref else [cap2, cap3, cap4, cap5])
 
-        refs.append([cap1, cap2, cap3, cap4, cap5] if include_self_ref else [cap2, cap3, cap4, cap5])
+    for idx in indices[dev_size:]:
+        img_id, captions = all_captions[idx]
+        chosen_captions = np.random.choice(captions, size=5, replace=False).tolist()
+        chosen_captions = list(map(preprocess, chosen_captions))
+        cap1, cap2, cap3, cap4, cap5 = chosen_captions
 
-    return dataset, refs
+        test_dataset.append([cap1, cap2])
+        test_refs.append([cap1, cap2, cap3, cap4, cap5] if include_self_ref else [cap2, cap3, cap4, cap5])
+
+    return (dev_dataset, dev_refs), (test_dataset, test_refs)
 
 
 if __name__ == "__main__":
-    res, _ = mscoco_test_set_1()
-    assert len(res) == 20_000
-    res, _ = mscoco_test_set_2()
-    assert len(res) == 20_000
-    res, _ = mscoco_test_set_3()
-    assert len(res) == 20_000
+    train_dir = os.path.join(DATA_DIR, "train_set")
+    if not os.path.exists(train_dir):
+        os.makedirs(train_dir)
+
+    # TODO: utility for obtaining & writing vocabulary of training set
+    raw_train_set = mscoco_training_set()
+    with open(os.path.join(train_dir, "train_src.txt"), "w") as f_src, \
+            open(os.path.join(train_dir, "train_dst.txt"), "w") as f_dst:
+        for curr_src, curr_tgt in raw_train_set:
+            print(" ".join(curr_src), file=f_src)
+            print(" ".join(curr_tgt), file=f_dst)
+    print(f"**Wrote {len(raw_train_set)} train examples to '{train_dir}'**")
+
+    dev_dir = os.path.join(DATA_DIR, "dev_set")
+    if not os.path.exists(dev_dir):
+        os.makedirs(dev_dir)
+
+    test_dir = os.path.join(DATA_DIR, "test_set")
+    if not os.path.exists(test_dir):
+        os.makedirs(test_dir)
+
+    # NOTE: Self-reference is always placed as reference#0
+    (raw_dev_set, _), (raw_test_set, test_refs) = mscoco_test_set(include_self_ref=True)
+
+    with open(os.path.join(dev_dir, "dev_src.txt"), "w") as f_src, \
+            open(os.path.join(dev_dir, "dev_dst.txt"), "w") as f_dst:
+        # Only write source-target pairs for dev set
+        for curr_src, curr_tgt in raw_dev_set:
+            print(" ".join(curr_src), file=f_src)
+            print(" ".join(curr_tgt), file=f_dst)
+    print(f"**Wrote {len(raw_dev_set)} dev examples to '{dev_dir}'**")
+
+    num_refs = len(test_refs[0])
+    with open(os.path.join(test_dir, "test_src.txt"), "w") as f_src, \
+            open(os.path.join(test_dir, "test_dst.txt"), "w") as f_dst:
+        ref_files = [open(os.path.join(test_dir, f"test_ref{i}.txt"), "w") for i in range(num_refs)]
+        # Write source-target pairs and source-references for test set
+        for idx, (curr_src, curr_tgt) in enumerate(raw_test_set):
+            curr_refs = test_refs[idx]
+            print(" ".join(curr_src), file=f_src)
+            print(" ".join(curr_tgt), file=f_dst)
+            for idx_ref, ref in enumerate(curr_refs):
+                print(" ".join(ref), file=ref_files[idx_ref])
+
+        for f in ref_files:
+            f.close()
+    print(f"**Wrote {len(raw_test_set)} test examples to '{test_dir}', {num_refs} references per example**")
