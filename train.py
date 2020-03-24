@@ -43,7 +43,7 @@ def debug_preds(preds_tensor, id2tok):
 # A common train/dev function for running a single batch through the seq2seq model
 def train_batch(batch_source, batch_target,
                 enc_model, dec_model,
-                enc_optimizer, dec_optimizer,
+                enc_optimizer, dec_optimizer, loss_fn,
                 teacher_forcing_proba, eval_mode=False):
     enc_optimizer.zero_grad()
     dec_optimizer.zero_grad()
@@ -151,7 +151,7 @@ if __name__ == "__main__":
             curr_src = train_input[curr_indices].to(device)
             curr_tgt = train_target[curr_indices].to(device)
 
-            train_loss += train_batch(curr_src, curr_tgt, enc_model, dec_model, enc_optimizer, dec_optimizer,
+            train_loss += train_batch(curr_src, curr_tgt, enc_model, dec_model, enc_optimizer, dec_optimizer, loss_fn,
                                       teacher_forcing_proba=TEACHER_FORCING_PROBA)
 
             if (1 + idx_batch) % LOG_EVERY_N_BATCHES == 0:
@@ -173,7 +173,7 @@ if __name__ == "__main__":
                 curr_batch_size = curr_src.shape[0]  # in case of partial batches
                 dev_batches_considered += curr_batch_size / BATCH_SIZE
 
-                dev_loss += train_batch(curr_src, curr_tgt, enc_model, dec_model, enc_optimizer, dec_optimizer,
+                dev_loss += train_batch(curr_src, curr_tgt, enc_model, dec_model, enc_optimizer, dec_optimizer, loss_fn,
                                         teacher_forcing_proba=TEACHER_FORCING_PROBA if TEACHER_FORCING_PROBA > (1.0 - 1e-5) else 0.0,
                                         eval_mode=True)
 
