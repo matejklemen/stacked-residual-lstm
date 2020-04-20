@@ -139,17 +139,16 @@ if __name__ == "__main__":
     for idx_epoch in range(NUM_EPOCHS):
         log_lr(1 + idx_epoch, enc_optimizer, dec_optimizer)
         num_batches_considered, train_loss = 0, 0.0
-        shuffle_idx = torch.randperm(num_train).to(device)
+        shuffle_idx = torch.randperm(train_batches).to(device)
 
         enc_model.train()
         dec_model.train()
-        for idx_batch in range(train_batches):
+        for idx_batch in shuffle_idx:
             start, end = idx_batch * BATCH_SIZE, (idx_batch + 1) * BATCH_SIZE
-            curr_indices = shuffle_idx[start: end]
-            curr_batch_size = curr_indices.shape[0]  # in case of partial batches
+            curr_src = train_input[start: end].to(device)
+            curr_tgt = train_target[start: end].to(device)
+            curr_batch_size = curr_src.shape[0]  # in case of partial batches
             num_batches_considered += curr_batch_size / BATCH_SIZE
-            curr_src = train_input[curr_indices].to(device)
-            curr_tgt = train_target[curr_indices].to(device)
 
             train_loss += train_batch(curr_src, curr_tgt, enc_model, dec_model, enc_optimizer, dec_optimizer, loss_fn,
                                       teacher_forcing_proba=TEACHER_FORCING_PROBA)
