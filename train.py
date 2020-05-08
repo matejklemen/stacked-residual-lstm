@@ -134,7 +134,7 @@ class Trainer:
         # Encoder pass
         last_lay_hids, (last_t_hids, last_t_cells) = self.enc_model(src)
 
-        curr_input = torch.tensor([[tok2id["<BOS>"]] for _ in range(curr_batch_size)],
+        curr_input = torch.tensor([[self.tok2id["<BOS>"]] for _ in range(curr_batch_size)],
                                   dtype=torch.long, device=DEVICE)
         curr_hids, curr_cells = last_t_hids, last_t_cells
 
