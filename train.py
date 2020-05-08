@@ -1,14 +1,22 @@
-import torch
-import torch.optim as optim
-import torch.nn as nn
+import json
+import logging
 import os
-
-from time import time
+from datetime import datetime
 from random import random
+from time import time
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
 
 from data_handler import load_vocab, load_pairs
 from seq2seq import ResidualLSTMEncoder, ResidualLSTMDecoder
 from util import encode_seq2seq, greedy_decode
+
+train_logger = logging.getLogger()
+train_logger.setLevel(logging.INFO)
+DEFAULT_MODEL_DIR = "models/"
+DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 
 class PerplexityLoss(nn.CrossEntropyLoss):
@@ -22,11 +30,182 @@ class PerplexityLoss(nn.CrossEntropyLoss):
         return torch.exp(ce)
 
 
+class Trainer:
+    def __init__(self, vocab, max_seq_len, num_epochs, batch_size, tf_proba_train, num_layers,
+                 enc_inp_hid_size, dec_inp_size, dec_hid_size, dropout, enc_bidirectional, dec_attn_layers,
+                 model_name=None, tf_proba_dev=0.0, residual_layers=None, log_every_n_batches=100):
+        self.model_name = datetime.now().strftime('%Y-%m-%dT%H:%M:%S') if model_name is None else model_name
+        self.model_save_dir = os.path.join(DEFAULT_MODEL_DIR, self.model_name)
+        print(f"Saving model details into '{self.model_save_dir}'")
+        if not os.path.exists(self.model_save_dir):
+            os.makedirs(self.model_save_dir)
+
+        self.max_seq_len = max_seq_len
+        self.num_epochs = num_epochs
+        self.batch_size = batch_size
+        self.tf_proba_train = tf_proba_train
+        self.tf_proba_dev = tf_proba_dev
+        # TODO: support for source vocab, target vocab?
+        self.tok2id = vocab
+        self.num_layers = num_layers
+        self.residual_layers = residual_layers if residual_layers is not None else []
+        self.enc_inp_hid_size = enc_inp_hid_size
+        self.dec_inp_size = dec_inp_size
+        self.dec_hid_size = dec_hid_size
+        self.dropout = dropout
+        self.enc_bidirectional = enc_bidirectional
+        self.dec_attn_layers = dec_attn_layers
+        self.log_every_n_batches = log_every_n_batches
+
+        assert self.batch_size > 1
+
+        SKIP_CONFIG = {'model_save_dir', 'tok2id'}
+        # Save config (= class attributes) before constructing the actual models
+        with open(os.path.join(self.model_save_dir, "config.json"), "w") as f_config:
+            config = {key: value for key, value in vars(self).items() if key not in SKIP_CONFIG}
+            json.dump(config, fp=f_config, indent=4)
+        logging.info("Model config:")
+        for attr_name, attr_value in vars(self).items():
+            logging.info(f"\t{attr_name} = {attr_value}")
+
+        self.enc_model = ResidualLSTMEncoder(vocab_size=len(self.tok2id),
+                                             num_layers=self.num_layers, residual_layers=self.residual_layers,
+                                             inp_hid_size=self.enc_inp_hid_size,
+                                             dropout=self.dropout, bidirectional=self.enc_bidirectional).to(DEVICE)
+        self.dec_model = ResidualLSTMDecoder(vocab_size=len(self.tok2id),
+                                             num_layers=4, residual_layers=[1, 3],
+                                             inp_size=512, hid_size=512,
+                                             dropout=0.5, num_attn_layers=1).to(DEVICE)
+
+        self.enc_optimizer = optim.SGD(self.enc_model.parameters(), lr=1.0)
+        self.dec_optimizer = optim.SGD(self.dec_model.parameters(), lr=1.0)
+        self.enc_scheduler = optim.lr_scheduler.StepLR(self.enc_optimizer, step_size=3, gamma=0.5)
+        self.dec_scheduler = optim.lr_scheduler.StepLR(self.dec_optimizer, step_size=3, gamma=0.5)
+        self.loss_fn = PerplexityLoss(ignore_index=self.tok2id["<PAD>"])
+
+        self.id2tok = {}
+        for token, idx in self.tok2id.items():
+            self.id2tok[idx] = token
+
+        with open(os.path.join(self.model_save_dir, "vocab.txt"), "w") as f_vocab:
+            # Note: assumes tokens are indexed from 0 to (|vocab| - 1)
+            for token, _ in sorted(self.tok2id.items(), key=lambda tup: tup[1]):
+                print(token, file=f_vocab)
+
+    def _process_batch(self, src, tgt, eval_mode=False):
+        self.enc_optimizer.zero_grad()
+        self.dec_optimizer.zero_grad()
+
+        curr_batch_size = src.shape[0]
+        # Encoder pass
+        last_lay_hids, (last_t_hids, last_t_cells) = self.enc_model(src)
+
+        curr_input = torch.tensor([[tok2id["<BOS>"]] for _ in range(curr_batch_size)],
+                                  dtype=torch.long, device=DEVICE)
+        curr_hids, curr_cells = last_t_hids, last_t_cells
+
+        this_batch_logits = []
+        teacher_forcing_proba = self.tf_proba_dev if eval_mode else self.tf_proba_train
+        use_teacher_forcing = random() < teacher_forcing_proba
+        # Decoder pass
+        for dec_step in range(self.max_seq_len):
+            logits, curr_hids, curr_cells = self.dec_model(curr_input,
+                                                           enc_hidden=last_lay_hids,
+                                                           dec_hiddens=curr_hids,
+                                                           dec_cells=curr_cells)
+            this_batch_logits.append(logits[:, 0, :].unsqueeze(2))
+            curr_preds = greedy_decode(logits)
+
+            if use_teacher_forcing:
+                curr_input = tgt[:, dec_step].unsqueeze(1)
+            else:
+                curr_input = curr_preds
+
+        # Always calculate loss - model selection metric
+        batch_loss = self.loss_fn(torch.cat(this_batch_logits, dim=2), tgt)
+        if not eval_mode:
+            batch_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.enc_model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(self.dec_model.parameters(), 1.0)
+            self.enc_optimizer.step()
+            self.dec_optimizer.step()
+
+        return float(batch_loss)
+
+    def train(self, train_src, train_tgt):
+        num_train_batches = (train_src.shape[0] + self.batch_size - 1) // self.batch_size
+        num_batches_considered, train_loss = 0, 0.0
+        shuffle_idx = torch.randperm(num_train_batches).to(device)
+
+        self.enc_model.train()
+        self.dec_model.train()
+        for idx_batch in shuffle_idx:
+            start, end = idx_batch * self.batch_size, (idx_batch + 1) * self.batch_size
+            curr_src = train_src[start: end].to(DEVICE)
+            curr_tgt = train_tgt[start: end].to(DEVICE)
+            curr_batch_size = curr_src.shape[0]  # in case of partial batches
+            num_batches_considered += curr_batch_size / self.batch_size
+
+            train_loss += self._process_batch(curr_src, curr_tgt)
+
+            if (1 + idx_batch) % self.log_every_n_batches == 0:
+                train_logger.info(f"Batch #{1 + idx_batch}: train_loss={train_loss / num_batches_considered:.4f}")
+
+        train_logger.info(f"Train_loss={train_loss / num_batches_considered:.4f}")
+        self.enc_scheduler.step()
+        self.dec_scheduler.step()
+
+        return train_loss / num_batches_considered
+
+    def validate(self, dev_src, dev_tgt):
+        num_dev_batches = (dev_src.shape[0] + self.batch_size - 1) // self.batch_size
+        dev_loss, dev_batches_considered = 0.0, 0
+        with torch.no_grad():
+            self.enc_model.eval()
+            self.dec_model.eval()
+            for idx_batch in range(num_dev_batches):
+                start, end = idx_batch * self.batch_size, (idx_batch + 1) * self.batch_size
+                curr_src = dev_src[start: end].to(device)
+                curr_tgt = dev_tgt[start: end].to(device)
+                curr_batch_size = curr_src.shape[0]  # in case of partial batches
+                dev_batches_considered += curr_batch_size / self.batch_size
+
+                dev_loss += self._process_batch(curr_src, curr_tgt, eval_mode=True)
+
+        train_logger.info(f"Dev_loss={dev_loss / dev_batches_considered:.4f}")
+        return dev_loss / dev_batches_considered
+
+    def run(self, train_src, train_tgt, dev_src=None, dev_tgt=None):
+        best_dev_loss, best_epoch = float("inf"), None
+
+        t_start = time()
+        for idx_epoch in range(self.num_epochs):
+            train_logger.info(f"Epoch {1 + idx_epoch}")
+            log_lr(1 + idx_epoch, self.enc_optimizer, self.dec_optimizer)
+
+            self.train(train_src, train_tgt)
+            if dev_src is not None and dev_tgt is not None:
+                # Save best state according to validation metric
+                avg_dev_loss = self.validate(dev_src, dev_tgt)
+                if avg_dev_loss < best_dev_loss:
+                    train_logger.info(f"Saving new best model state to '{self.model_save_dir}'")
+                    best_dev_loss, best_epoch = avg_dev_loss, idx_epoch
+                    torch.save(self.enc_model.state_dict(), os.path.join(self.model_save_dir, "enc.pt"))
+                    torch.save(self.dec_model.state_dict(), os.path.join(self.model_save_dir, "dec.pt"))
+            else:
+                # If no validation set is used, save last state
+                torch.save(self.enc_model.state_dict(), os.path.join(self.model_save_dir, "enc.pt"))
+                torch.save(self.dec_model.state_dict(), os.path.join(self.model_save_dir, "dec.pt"))
+
+        train_logger.info(f"Best state was after epoch {1 + best_epoch}: loss = {best_dev_loss}")
+        train_logger.info(f"Training took {time() - t_start}s")
+
+
 # A utility function for checking learning rate decay
 def log_lr(epoch, enc_opt, dec_opt):
-    print(f"Epoch #{epoch}:")
-    print(f"Encoder LR: {[group['lr'] for group in enc_opt.param_groups][0]}")
-    print(f"Decoder LR: {[group['lr'] for group in dec_opt.param_groups][0]}")
+    train_logger.info(f"Epoch #{epoch}:")
+    train_logger.info(f"Encoder LR: {[group['lr'] for group in enc_opt.param_groups][0]}")
+    train_logger.info(f"Decoder LR: {[group['lr'] for group in dec_opt.param_groups][0]}")
 
 
 # A utility function for prettyprinting a few predicted examples
@@ -40,61 +219,12 @@ def debug_preds(preds_tensor, id2tok):
         print("")
 
 
-# A common train/dev function for running a single batch through the seq2seq model
-def train_batch(batch_source, batch_target,
-                enc_model, dec_model,
-                enc_optimizer, dec_optimizer, loss_fn,
-                teacher_forcing_proba, eval_mode=False):
-    enc_optimizer.zero_grad()
-    dec_optimizer.zero_grad()
-
-    curr_batch_size = batch_source.shape[0]
-    last_lay_hids, (last_t_hids, last_t_cells) = enc_model(batch_source)
-
-    curr_input = torch.tensor([[tok2id["<BOS>"]] for _ in range(curr_batch_size)],
-                              dtype=torch.long, device=batch_source.device)
-    curr_hids, curr_cells = last_t_hids, last_t_cells
-
-    this_batch_logits = []
-    use_teacher_forcing = random() < teacher_forcing_proba
-    for dec_step in range(MAX_SEQ_LEN):
-        logits, curr_hids, curr_cells = dec_model(curr_input,
-                                                  enc_hidden=last_lay_hids,
-                                                  dec_hiddens=curr_hids,
-                                                  dec_cells=curr_cells)
-        this_batch_logits.append(logits[:, 0, :].unsqueeze(2))
-        curr_preds = greedy_decode(logits)
-
-        if use_teacher_forcing:
-            curr_input = batch_target[:, dec_step].unsqueeze(1)
-        else:
-            curr_input = curr_preds
-
-    batch_loss = loss_fn(torch.cat(this_batch_logits, dim=2), batch_target)
-    if not eval_mode:
-        batch_loss.backward()
-        torch.nn.utils.clip_grad_norm_(enc_model.parameters(), 1.0)
-        torch.nn.utils.clip_grad_norm_(dec_model.parameters(), 1.0)
-        enc_optimizer.step()
-        dec_optimizer.step()
-
-    return float(batch_loss)
-
-
 if __name__ == "__main__":
     MAX_SEQ_LEN = 20
-    NUM_EPOCHS = 30
+    NUM_EPOCHS = 1
     BATCH_SIZE = 256
-    LOG_EVERY_N_BATCHES = 100
-    TEACHER_FORCING_PROBA = 1.0
-    assert BATCH_SIZE > 1
 
     DATA_DIR = "data/mscoco"
-    MODEL_NAME = "4_layer_res13_attn1_lstm"
-    model_save_dir = os.path.join(DATA_DIR, MODEL_NAME)
-    if not os.path.exists(model_save_dir):
-        os.makedirs(model_save_dir)
-
     torch.manual_seed(1)
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     print(f"**Using device {device}**")
@@ -104,85 +234,14 @@ if __name__ == "__main__":
     raw_dev_set = load_pairs(src_path=os.path.join(DATA_DIR, "dev_set", "dev_src.txt"),
                              tgt_path=os.path.join(DATA_DIR, "dev_set", "dev_dst.txt"))
     tok2id, id2tok = load_vocab(os.path.join(DATA_DIR, "vocab.txt"))
-    print(f"**{len(raw_train_set)} train examples, {len(raw_dev_set)} dev examples, vocab = {len(tok2id)} tokens**")
+    train_logger.info(f"{len(raw_train_set)} train examples, {len(raw_dev_set)} dev examples, vocab = {len(tok2id)} tokens")
+    trainer = Trainer(model_name='joze', max_seq_len=MAX_SEQ_LEN, num_epochs=NUM_EPOCHS, batch_size=BATCH_SIZE,
+                      tf_proba_train=1.0, tf_proba_dev=1.0, num_layers=4, residual_layers=[1, 3],
+                      enc_inp_hid_size=512, dec_inp_size=512, dec_hid_size=512, dropout=0.6, enc_bidirectional=False,
+                      dec_attn_layers=1, vocab=tok2id, log_every_n_batches=100)
 
     train_input, train_target = encode_seq2seq(raw_train_set, tok2id, MAX_SEQ_LEN)
     dev_input, dev_target = encode_seq2seq(raw_dev_set, tok2id, MAX_SEQ_LEN)
 
-    enc_model = ResidualLSTMEncoder(vocab_size=len(tok2id),
-                                    num_layers=4, residual_layers=[1, 3],
-                                    inp_hid_size=512,
-                                    dropout=0.5,
-                                    bidirectional=False).to(device)
-    dec_model = ResidualLSTMDecoder(vocab_size=len(tok2id),
-                                    num_layers=4, residual_layers=[1, 3],
-                                    inp_size=512,
-                                    hid_size=512,
-                                    dropout=0.5,
-                                    num_attn_layers=1).to(device)
-
-    # SGD, learning rate = 1.0, halved after every 3rd epoch, trained for 10 epochs
-    enc_optimizer = optim.SGD(enc_model.parameters(), lr=1.0)
-    dec_optimizer = optim.SGD(dec_model.parameters(), lr=1.0)
-    enc_scheduler = optim.lr_scheduler.StepLR(enc_optimizer, step_size=3, gamma=0.5)
-    dec_scheduler = optim.lr_scheduler.StepLR(dec_optimizer, step_size=3, gamma=0.5)
-    loss_fn = PerplexityLoss(ignore_index=tok2id["<PAD>"])
-
-    best_dev_loss, best_epoch = float("inf"), None
-    num_train, num_dev = train_input.shape[0], dev_input.shape[0]
-    train_batches = (num_train + BATCH_SIZE - 1) // BATCH_SIZE
-    dev_batches = (num_dev + BATCH_SIZE - 1) // BATCH_SIZE
-    print(f"**{num_train} train examples, {num_dev} dev examples, "
-          f"batch_size={BATCH_SIZE}, {train_batches} train batches/epoch**")
-
-    t_start = time()
-    for idx_epoch in range(NUM_EPOCHS):
-        log_lr(1 + idx_epoch, enc_optimizer, dec_optimizer)
-        num_batches_considered, train_loss = 0, 0.0
-        shuffle_idx = torch.randperm(train_batches).to(device)
-
-        enc_model.train()
-        dec_model.train()
-        for idx_batch in shuffle_idx:
-            start, end = idx_batch * BATCH_SIZE, (idx_batch + 1) * BATCH_SIZE
-            curr_src = train_input[start: end].to(device)
-            curr_tgt = train_target[start: end].to(device)
-            curr_batch_size = curr_src.shape[0]  # in case of partial batches
-            num_batches_considered += curr_batch_size / BATCH_SIZE
-
-            train_loss += train_batch(curr_src, curr_tgt, enc_model, dec_model, enc_optimizer, dec_optimizer, loss_fn,
-                                      teacher_forcing_proba=TEACHER_FORCING_PROBA)
-
-            if (1 + idx_batch) % LOG_EVERY_N_BATCHES == 0:
-                print(f"**Batch #{1 + idx_batch}: train_loss={train_loss / num_batches_considered:.4f}**")
-
-        print(f"**Epoch #{1 + idx_epoch}: train_loss={train_loss / num_batches_considered:.4f}**")
-        enc_scheduler.step()
-        dec_scheduler.step()
-
-        dev_loss, dev_batches_considered = 0.0, 0
-        # Evaluation on dev set after each epoch
-        with torch.no_grad():
-            enc_model.eval()
-            dec_model.eval()
-            for idx_batch in range(dev_batches):
-                start, end = idx_batch * BATCH_SIZE, (idx_batch + 1) * BATCH_SIZE
-                curr_src = dev_input[start: end].to(device)
-                curr_tgt = dev_target[start: end].to(device)
-                curr_batch_size = curr_src.shape[0]  # in case of partial batches
-                dev_batches_considered += curr_batch_size / BATCH_SIZE
-
-                dev_loss += train_batch(curr_src, curr_tgt, enc_model, dec_model, enc_optimizer, dec_optimizer, loss_fn,
-                                        teacher_forcing_proba=TEACHER_FORCING_PROBA if TEACHER_FORCING_PROBA > (1.0 - 1e-5) else 0.0,
-                                        eval_mode=True)
-
-        curr_dev_loss = dev_loss / dev_batches_considered
-        print(f"**Epoch #{1 + idx_epoch}: dev_loss={curr_dev_loss:.4f}**")
-        if curr_dev_loss < best_dev_loss:
-            print(f"**Saving new best model state to '{model_save_dir}'**")
-            best_dev_loss, best_epoch = curr_dev_loss, idx_epoch
-            torch.save(enc_model.state_dict(), os.path.join(model_save_dir, "enc.pt"))
-            torch.save(dec_model.state_dict(), os.path.join(model_save_dir, "dec.pt"))
-
-    print(f"**Best state was after epoch {1 + best_epoch}: loss = {best_dev_loss}**")
-    print(f"**Training took {time() - t_start}s**")
+    trainer.run(train_input, train_target, dev_src=dev_input, dev_tgt=dev_target)
+    exit(0)
