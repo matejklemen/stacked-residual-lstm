@@ -45,6 +45,7 @@ parser.add_argument("--dec_attn_layers", type=int, default=1,
                     help="Number of attention layers used when decoding. Supported values are None (no attention), "
                          "1 (same attention layer is used for all encoder layers) and num_layers (one attention layer "
                          "per encoder layer)")
+parser.add_argument("--early_stopping_rounds", type=int, default=1)
 
 train_logger = logging.getLogger()
 train_logger.setLevel(logging.INFO)
@@ -66,7 +67,8 @@ class PerplexityLoss(nn.CrossEntropyLoss):
 class Trainer:
     def __init__(self, vocab, max_seq_len, num_epochs, batch_size, tf_proba_train, num_layers,
                  enc_inp_hid_size, dec_inp_size, dec_hid_size, dropout, enc_bidirectional, dec_attn_layers,
-                 model_name=None, tf_proba_dev=0.0, residual_layers=None, log_every_n_batches=100):
+                 model_name=None, tf_proba_dev=0.0, residual_layers=None, early_stopping_rounds=1,
+                 log_every_n_batches=100):
         self.model_name = datetime.now().strftime('%Y-%m-%dT%H:%M:%S') if model_name is None else model_name
         self.model_save_dir = os.path.join(DEFAULT_MODEL_DIR, self.model_name)
         print(f"Saving model details into '{self.model_save_dir}'")
@@ -89,6 +91,7 @@ class Trainer:
         self.enc_bidirectional = enc_bidirectional
         self.dec_attn_layers = dec_attn_layers
         self.log_every_n_batches = log_every_n_batches
+        self.early_stopping_rounds = early_stopping_rounds
 
         assert self.batch_size > 1
 
@@ -226,6 +229,10 @@ class Trainer:
                     best_dev_loss, best_epoch = avg_dev_loss, idx_epoch
                     torch.save(self.enc_model.state_dict(), os.path.join(self.model_save_dir, "enc.pt"))
                     torch.save(self.dec_model.state_dict(), os.path.join(self.model_save_dir, "dec.pt"))
+                if idx_epoch - best_epoch >= self.early_stopping_rounds:
+                    train_logger.info(f"Stopping early because validation metric did not improve for "
+                                      f"{self.early_stopping_rounds} rounds")
+                    break
             else:
                 # If no validation set is used, save last state
                 torch.save(self.enc_model.state_dict(), os.path.join(self.model_save_dir, "enc.pt"))
@@ -277,7 +284,8 @@ if __name__ == "__main__":
                       enc_bidirectional=args.enc_bidirectional,
                       dec_attn_layers=args.dec_attn_layers,
                       vocab=tok2id,  # TODO: add support for CLI use
-                      log_every_n_batches=args.log_every_n_batches)
+                      log_every_n_batches=args.log_every_n_batches,
+                      early_stopping_rounds=args.early_stopping_rounds)
 
     train_input, train_target = encode_seq2seq(raw_train_set, tok2id, args.max_seq_len)
     dev_input, dev_target = encode_seq2seq(raw_dev_set, tok2id, args.max_seq_len)
