@@ -107,9 +107,9 @@ class Trainer:
                                              inp_hid_size=self.enc_inp_hid_size,
                                              dropout=self.dropout, bidirectional=self.enc_bidirectional).to(DEVICE)
         self.dec_model = ResidualLSTMDecoder(vocab_size=len(self.tok2id),
-                                             num_layers=4, residual_layers=[1, 3],
-                                             inp_size=512, hid_size=512,
-                                             dropout=0.5, num_attn_layers=1).to(DEVICE)
+                                             num_layers=self.num_layers, residual_layers=self.residual_layers,
+                                             inp_size=self.dec_inp_size, hid_size=self.dec_hid_size,
+                                             dropout=self.dropout, num_attn_layers=self.dec_attn_layers).to(DEVICE)
 
         self.enc_optimizer = optim.SGD(self.enc_model.parameters(), lr=1.0)
         self.dec_optimizer = optim.SGD(self.dec_model.parameters(), lr=1.0)
