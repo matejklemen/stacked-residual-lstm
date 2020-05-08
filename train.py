@@ -1,3 +1,4 @@
+import argparse
 import json
 import logging
 import os
@@ -12,6 +13,38 @@ import torch.optim as optim
 from data_handler import load_vocab, load_pairs
 from seq2seq import ResidualLSTMEncoder, ResidualLSTMDecoder
 from util import encode_seq2seq, greedy_decode
+
+parser = argparse.ArgumentParser(description="Train a seq2seq model")
+parser.add_argument("--model_name", type=str, default=None)
+# TODO: enable using these
+# parser.add_argument("--data_dir", type=str, required=True,
+#                     help="A directory where data (source and target sequences) and a vocab file are assumed to be.")
+# parser.add_argument("--vocab_file")
+
+parser.add_argument("--max_seq_len", type=int, default=20,
+                    help="Max sequence length in number of tokens. <BOS> and <EOS> are included in this number.")
+parser.add_argument("--num_epochs", type=int, default=10)
+parser.add_argument("--batch_size", type=int, default=64)
+
+parser.add_argument("--log_every_n_batches", type=int, default=100)
+parser.add_argument("--tf_proba_train", type=float, default=1.0,
+                    help="Probability of using teacher forcing when training model on a batch.")
+parser.add_argument("--tf_proba_dev", type=float, default=0.0,
+                    help="Probability of using teacher forcing when validating model on a batch.")
+parser.add_argument("--num_layers", type=int, default=4)
+parser.add_argument("--residual_layers", type=str, default=None,
+                    help="Space-delimited 0-based indices of layers, after which a residual connection is applied.")
+# TODO: separate encoder input and hidden size and perform dimensionality checks internally
+parser.add_argument("--enc_inp_hid_size", type=int, default=512,
+                    help="Input and hidden state size of the encoder model.")
+parser.add_argument("--dec_inp_size", type=int, default=512)
+parser.add_argument("--dec_hid_size", type=int, default=512)
+parser.add_argument("--dropout", type=float, default=0.6)
+parser.add_argument("--enc_bidirectional", action="store_true")
+parser.add_argument("--dec_attn_layers", type=int, default=1,
+                    help="Number of attention layers used when decoding. Supported values are None (no attention), "
+                         "1 (same attention layer is used for all encoder layers) and num_layers (one attention layer "
+                         "per encoder layer)")
 
 train_logger = logging.getLogger()
 train_logger.setLevel(logging.INFO)
@@ -66,7 +99,8 @@ class Trainer:
             json.dump(config, fp=f_config, indent=4)
         logging.info("Model config:")
         for attr_name, attr_value in vars(self).items():
-            logging.info(f"\t{attr_name} = {attr_value}")
+            if attr_name not in SKIP_CONFIG:
+                logging.info(f"\t{attr_name} = {attr_value}")
 
         self.enc_model = ResidualLSTMEncoder(vocab_size=len(self.tok2id),
                                              num_layers=self.num_layers, residual_layers=self.residual_layers,
@@ -135,7 +169,7 @@ class Trainer:
     def train(self, train_src, train_tgt):
         num_train_batches = (train_src.shape[0] + self.batch_size - 1) // self.batch_size
         num_batches_considered, train_loss = 0, 0.0
-        shuffle_idx = torch.randperm(num_train_batches).to(device)
+        shuffle_idx = torch.randperm(num_train_batches).to(DEVICE)
 
         self.enc_model.train()
         self.dec_model.train()
@@ -165,8 +199,8 @@ class Trainer:
             self.dec_model.eval()
             for idx_batch in range(num_dev_batches):
                 start, end = idx_batch * self.batch_size, (idx_batch + 1) * self.batch_size
-                curr_src = dev_src[start: end].to(device)
-                curr_tgt = dev_tgt[start: end].to(device)
+                curr_src = dev_src[start: end].to(DEVICE)
+                curr_tgt = dev_tgt[start: end].to(DEVICE)
                 curr_batch_size = curr_src.shape[0]  # in case of partial batches
                 dev_batches_considered += curr_batch_size / self.batch_size
 
@@ -208,40 +242,44 @@ def log_lr(epoch, enc_opt, dec_opt):
     train_logger.info(f"Decoder LR: {[group['lr'] for group in dec_opt.param_groups][0]}")
 
 
-# A utility function for prettyprinting a few predicted examples
-def debug_preds(preds_tensor, id2tok):
-    # preds_tensor... (batch_size, max_seq_len)
-    # id2tok... mapping from integers to raw tokens
-    for idx_ex in range(min(4, preds_tensor.shape[0])):
-        for idx_tok in range(MAX_SEQ_LEN):
-            curr_tok = int(preds_tensor[idx_ex, idx_tok])
-            print(id2tok[curr_tok], end=" ")
-        print("")
-
-
 if __name__ == "__main__":
-    MAX_SEQ_LEN = 20
-    NUM_EPOCHS = 1
-    BATCH_SIZE = 256
-
     DATA_DIR = "data/mscoco"
-    torch.manual_seed(1)
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    print(f"**Using device {device}**")
+    args = parser.parse_args()
+    parsed_residual_layers = None
+    # Turn space-delimited layer indices into a list
+    if args.residual_layers is not None:
+        parsed_residual_layers = list(map(int, args.residual_layers.split(",")))
+        for layer_id in parsed_residual_layers:
+            if layer_id >= args.num_layers:
+                raise ValueError(f"Cannot apply residual connection after non-existing layer "
+                                 f"(max layer id allowed = num_layers - 1 = {args.num_layers - 1})")
+        args.residual_layers = parsed_residual_layers
 
+    torch.manual_seed(1)
     raw_train_set = load_pairs(src_path=os.path.join(DATA_DIR, "train_set", "train_src.txt"),
                                tgt_path=os.path.join(DATA_DIR, "train_set", "train_dst.txt"))
     raw_dev_set = load_pairs(src_path=os.path.join(DATA_DIR, "dev_set", "dev_src.txt"),
                              tgt_path=os.path.join(DATA_DIR, "dev_set", "dev_dst.txt"))
     tok2id, id2tok = load_vocab(os.path.join(DATA_DIR, "vocab.txt"))
     train_logger.info(f"{len(raw_train_set)} train examples, {len(raw_dev_set)} dev examples, vocab = {len(tok2id)} tokens")
-    trainer = Trainer(model_name='joze', max_seq_len=MAX_SEQ_LEN, num_epochs=NUM_EPOCHS, batch_size=BATCH_SIZE,
-                      tf_proba_train=1.0, tf_proba_dev=1.0, num_layers=4, residual_layers=[1, 3],
-                      enc_inp_hid_size=512, dec_inp_size=512, dec_hid_size=512, dropout=0.6, enc_bidirectional=False,
-                      dec_attn_layers=1, vocab=tok2id, log_every_n_batches=100)
+    trainer = Trainer(model_name=args.model_name,
+                      max_seq_len=args.max_seq_len,
+                      num_epochs=args.num_epochs,
+                      batch_size=args.batch_size,
+                      tf_proba_train=args.tf_proba_train,
+                      tf_proba_dev=args.tf_proba_dev,
+                      num_layers=args.num_layers,
+                      residual_layers=args.residual_layers,
+                      enc_inp_hid_size=args.enc_inp_hid_size,
+                      dec_inp_size=args.dec_inp_size,
+                      dec_hid_size=args.dec_hid_size,
+                      dropout=args.dropout,
+                      enc_bidirectional=args.enc_bidirectional,
+                      dec_attn_layers=args.dec_attn_layers,
+                      vocab=tok2id,  # TODO: add support for CLI use
+                      log_every_n_batches=args.log_every_n_batches)
 
-    train_input, train_target = encode_seq2seq(raw_train_set, tok2id, MAX_SEQ_LEN)
-    dev_input, dev_target = encode_seq2seq(raw_dev_set, tok2id, MAX_SEQ_LEN)
+    train_input, train_target = encode_seq2seq(raw_train_set, tok2id, args.max_seq_len)
+    dev_input, dev_target = encode_seq2seq(raw_dev_set, tok2id, args.max_seq_len)
 
     trainer.run(train_input, train_target, dev_src=dev_input, dev_tgt=dev_target)
-    exit(0)
