@@ -19,7 +19,7 @@ def load_vocab(path):
 
     with open(path, "r") as f:
         for token in f:
-            pr_token = token.lower().strip()
+            pr_token = token.strip()
             if pr_token not in tok2id:
                 tok2id[pr_token] = len(tok2id)
                 id2tok[len(id2tok)] = pr_token
