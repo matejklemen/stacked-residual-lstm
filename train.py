@@ -129,6 +129,9 @@ class Trainer:
             for token, _ in sorted(self.tok2id.items(), key=lambda tup: tup[1]):
                 print(token, file=f_vocab)
 
+        fh = logging.FileHandler(os.path.join(self.model_save_dir, 'train_log.info'))
+        train_logger.addHandler(fh)
+
     def _process_batch(self, src, tgt, eval_mode=False):
         self.enc_optimizer.zero_grad()
         self.dec_optimizer.zero_grad()
