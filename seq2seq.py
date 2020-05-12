@@ -6,13 +6,14 @@ from torchnlp.nn import Attention
 
 class ResidualLSTMEncoder(nn.Module):
     def __init__(self, vocab_size, num_layers, residual_layers,
-                 inp_hid_size, dropout=0.0, bidirectional=False):
+                 inp_hid_size, dropout=0.0, bidirectional=False, residual_n=1):
         super().__init__()
 
         self.is_res = np.zeros(num_layers, dtype=bool)
         if residual_layers:
             for layer_id in residual_layers:
                 self.is_res[layer_id] = True
+        self.residual_n = residual_n
 
         # internally, each direction will produce inp_hid_size/2 features, which will get concatenated back together
         if bidirectional and inp_hid_size % 2 != 0:
@@ -49,28 +50,26 @@ class ResidualLSTMEncoder(nn.Module):
             [2] list of last cell states for each layer
                 (num_layers * (1, batch_size, hidden_size) tensors)
         """
-        batch_size, max_seq_len = encoded_seq.shape
-        num_directions = 2 if self.bidirectional else 1
         embedded = self.dropout(self.embeddings(encoded_seq))
 
         last_t_hids, last_t_cells = [], []
-        last_layer_hids = None
+        all_layers_hids = [embedded]
         curr_inp = embedded
         for i, curr_lstm in enumerate(self.layers):
             curr_out, (curr_hid, curr_cell) = curr_lstm(curr_inp)
-            # combine features for both directions
-            if self.bidirectional:
-                out_by_dir = curr_out.view(batch_size, max_seq_len, num_directions, self.hidden_size)
-                hid_by_dir = curr_hid.view(1, num_directions, batch_size, self.hidden_size)
-                cell_by_dir = curr_cell.view(1, num_directions, batch_size, self.hidden_size)
 
-                curr_out = torch.cat((out_by_dir[:, :, 0, :], out_by_dir[:, :, 1, :]), dim=2)
-                curr_hid = torch.cat((hid_by_dir[:, 0, :, :], hid_by_dir[:, 1, :, :]), dim=2)
-                curr_cell = torch.cat((cell_by_dir[:, 0, :, :], cell_by_dir[:, 1, :, :]), dim=2)
-
-            last_layer_hids = curr_out
+            all_layers_hids.append(curr_out)
+            # last_layer_hids = curr_out
             if self.is_res[i]:
-                curr_inp = curr_out + embedded
+                take_input_from = i - self.residual_n + 1
+                if take_input_from >= 0:
+                    identity = all_layers_hids[take_input_from]
+                else:
+                    # e.g. there is no input from 5 layers back when we are at point after layer 0
+                    # (the only input that could be added in this case is the embeddings)
+                    raise ValueError(f"Cannot add identity from {self.residual_n} layers back after layer {i}")
+
+                curr_inp = curr_out + identity
             else:
                 curr_inp = curr_out
 
@@ -81,18 +80,19 @@ class ResidualLSTMEncoder(nn.Module):
             last_t_hids.append(curr_hid)
             last_t_cells.append(curr_cell)
 
-        return last_layer_hids, (last_t_hids, last_t_cells)
+        return all_layers_hids[-1], (last_t_hids, last_t_cells)
 
 
 class ResidualLSTMDecoder(nn.Module):
-    def __init__(self, vocab_size, num_layers=4, residual_layers=[1],
-                 inp_size=6, hid_size=6, dropout=0.0, num_attn_layers=1):
+    def __init__(self, vocab_size, num_layers, residual_layers,
+                 inp_size, hid_size, dropout=0.0, num_attn_layers=1, residual_n=1):
         super().__init__()
 
         self.is_res = np.zeros(num_layers, dtype=bool)
         if residual_layers:
             for layer_id in residual_layers:
                 self.is_res[layer_id] = True
+        self.residual_n = residual_n
 
         self.num_layers = num_layers
         self.dropout = nn.Dropout(p=dropout)
@@ -124,6 +124,7 @@ class ResidualLSTMDecoder(nn.Module):
         embedded_input = self.dropout(self.embeddings(encoded_input))
         curr_inp = embedded_input
 
+        all_layers_hids = []
         hids, cells = [], []
         for i, curr_lstm in enumerate(self.layers):
             if self.num_attn_layers == 1:
@@ -135,9 +136,17 @@ class ResidualLSTMDecoder(nn.Module):
             else:  # no attention
                 decoder_inp = curr_inp
 
+            all_layers_hids.append(decoder_inp)
             curr_out, (curr_hid, curr_cell) = curr_lstm(decoder_inp, (dec_hiddens[i], dec_cells[i]))
             if self.is_res[i]:
-                curr_inp = curr_out + embedded_input
+                take_input_from = i - self.residual_n + 1
+                if take_input_from >= 0:
+                    identity = all_layers_hids[take_input_from]
+                else:
+                    # e.g. there is no input from 5 layers back when we are at point after layer 0
+                    # (the only input that could be added in this case is the input embeddings)
+                    raise ValueError(f"Cannot add identity from {self.residual_n} layers back after layer {i}")
+                curr_inp = curr_out + identity
             else:
                 curr_inp = curr_out
 

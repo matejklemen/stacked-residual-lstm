@@ -34,6 +34,9 @@ parser.add_argument("--tf_proba_dev", type=float, default=0.0,
 parser.add_argument("--num_layers", type=int, default=4)
 parser.add_argument("--residual_layers", type=str, default=None,
                     help="Comma-separated 0-based indices of layers, after which a residual connection is applied.")
+parser.add_argument("--residual_n", type=int, default=1,
+                    help="Input from how many layers back should be added in residual connection. "
+                         "E.g. residual_n=1 means input of current layer gets added to the output of layer")
 # TODO: separate encoder input and hidden size and perform dimensionality checks internally
 parser.add_argument("--enc_inp_hid_size", type=int, default=512,
                     help="Input and hidden state size of the encoder model.")
@@ -68,7 +71,7 @@ class PerplexityLoss(nn.CrossEntropyLoss):
 class Trainer:
     def __init__(self, vocab, max_seq_len, num_epochs, batch_size, tf_proba_train, num_layers,
                  enc_inp_hid_size, dec_inp_size, dec_hid_size, dropout, enc_bidirectional, dec_attn_layers,
-                 model_name=None, tf_proba_dev=0.0, residual_layers=None, early_stopping_rounds=1,
+                 model_name=None, tf_proba_dev=0.0, residual_layers=None, residual_n=1, early_stopping_rounds=1,
                  log_every_n_batches=100):
         self.model_name = datetime.now().strftime('%Y-%m-%dT%H:%M:%S') if model_name is None else model_name
         self.model_save_dir = os.path.join(DEFAULT_MODEL_DIR, self.model_name)
@@ -85,6 +88,7 @@ class Trainer:
         self.tok2id = vocab
         self.num_layers = num_layers
         self.residual_layers = residual_layers if residual_layers is not None else []
+        self.residual_n = residual_n
         self.enc_inp_hid_size = enc_inp_hid_size
         self.dec_inp_size = dec_inp_size
         self.dec_hid_size = dec_hid_size
@@ -108,11 +112,11 @@ class Trainer:
 
         self.enc_model = ResidualLSTMEncoder(vocab_size=len(self.tok2id),
                                              num_layers=self.num_layers, residual_layers=self.residual_layers,
-                                             inp_hid_size=self.enc_inp_hid_size,
+                                             residual_n=residual_n, inp_hid_size=self.enc_inp_hid_size,
                                              dropout=self.dropout, bidirectional=self.enc_bidirectional).to(DEVICE)
         self.dec_model = ResidualLSTMDecoder(vocab_size=len(self.tok2id),
                                              num_layers=self.num_layers, residual_layers=self.residual_layers,
-                                             inp_size=self.dec_inp_size, hid_size=self.dec_hid_size,
+                                             residual_n=residual_n, inp_size=self.dec_inp_size, hid_size=self.dec_hid_size,
                                              dropout=self.dropout, num_attn_layers=self.dec_attn_layers).to(DEVICE)
 
         self.enc_optimizer = optim.SGD(self.enc_model.parameters(), lr=1.0)
@@ -281,6 +285,7 @@ if __name__ == "__main__":
                       tf_proba_dev=args.tf_proba_dev,
                       num_layers=args.num_layers,
                       residual_layers=args.residual_layers,
+                      residual_n=args.residual_n,
                       enc_inp_hid_size=args.enc_inp_hid_size,
                       dec_inp_size=args.dec_inp_size,
                       dec_hid_size=args.dec_hid_size,
