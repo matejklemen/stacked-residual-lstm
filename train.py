@@ -17,8 +17,8 @@ from util import encode_seq2seq, greedy_decode
 parser = argparse.ArgumentParser(description="Train a seq2seq model")
 parser.add_argument("--model_name", type=str, default=None)
 # TODO: enable using these
-# parser.add_argument("--data_dir", type=str, required=True,
-#                     help="A directory where data (source and target sequences) and a vocab file are assumed to be.")
+parser.add_argument("--data_dir", type=str, required=True, default="data/mscoco",
+                    help="A directory where data (source and target sequences) and a vocab file are assumed to be.")
 # parser.add_argument("--vocab_file")
 
 parser.add_argument("--max_seq_len", type=int, default=20,
@@ -33,7 +33,7 @@ parser.add_argument("--tf_proba_dev", type=float, default=0.0,
                     help="Probability of using teacher forcing when validating model on a batch.")
 parser.add_argument("--num_layers", type=int, default=4)
 parser.add_argument("--residual_layers", type=str, default=None,
-                    help="Space-delimited 0-based indices of layers, after which a residual connection is applied.")
+                    help="Comma-separated 0-based indices of layers, after which a residual connection is applied.")
 # TODO: separate encoder input and hidden size and perform dimensionality checks internally
 parser.add_argument("--enc_inp_hid_size", type=int, default=512,
                     help="Input and hidden state size of the encoder model.")
@@ -51,6 +51,7 @@ train_logger = logging.getLogger()
 train_logger.setLevel(logging.INFO)
 DEFAULT_MODEL_DIR = "models/"
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+logging.info(f"Using device {DEVICE}")
 
 
 class PerplexityLoss(nn.CrossEntropyLoss):
@@ -253,10 +254,10 @@ def log_lr(epoch, enc_opt, dec_opt):
 
 
 if __name__ == "__main__":
-    DATA_DIR = "data/mscoco"
     args = parser.parse_args()
+    DATA_DIR = args.data_dir
     parsed_residual_layers = None
-    # Turn space-delimited layer indices into a list
+    # Turn comma-separated layer indices into a list
     if args.residual_layers is not None:
         parsed_residual_layers = list(map(int, args.residual_layers.split(",")))
         for layer_id in parsed_residual_layers:
