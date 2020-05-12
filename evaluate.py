@@ -1,42 +1,59 @@
+import argparse
 import os
 import sacrebleu
+import logging
+
+parser = argparse.ArgumentParser(description="Generate sequences using a seq2seq model")
+parser.add_argument("--model_name", type=str, required=True)
+parser.add_argument("--reference_files", type=str, required=True,
+                    help="Comma-separated file names where references are stored - each file should contain one "
+                         "example per line.")
+
+eval_logger = logging.getLogger()
+eval_logger.setLevel(logging.INFO)
+DEFAULT_MODEL_DIR = "models/"
+
+
+class Evaluator:
+    def __init__(self, hyp_list, refs_lists, is_lowercased=False, save_path=None):
+        self.hyp_list = hyp_list  # list of `num_examples` sequences
+        self.refs_lists = refs_lists  # list of `num_ref_streams` lists, each containing `num_examples` sequences
+        self.is_lowercased = is_lowercased
+        self.save_path = save_path
+
+        logging.info(f"Evaluating using {len(self.refs_lists)} reference streams")
+
+    def run(self):
+        sbleu = sacrebleu.corpus_bleu(self.hyp_list, self.refs_lists)
+        if self.save_path is not None:
+            with open(self.save_path) as f:
+                print(sbleu, file=f)
+
+        logging.info(f"[SacreBLEU] {sbleu}")
+        return sbleu
+
+    @staticmethod
+    def from_files(hypotheses_path, references_paths, lowercase=False):
+        with open(hypotheses_path) as f_hyp:
+            hypotheses = [line.strip().lower() for line in f_hyp] if lowercase else [line.strip() for line in f_hyp]
+
+        references = []
+        for i, curr_ref_path in enumerate(references_paths, start=1):
+            with open(curr_ref_path) as f_ref:
+                curr_refs = [line.strip().lower() for line in f_ref] if lowercase else [line.strip() for line in f_ref]
+                logging.info(f"Reference stream#{i}: {len(curr_refs)} references")
+                references.append(curr_refs)
+
+        return Evaluator(hypotheses, references, is_lowercased=lowercase)
 
 
 if __name__ == "__main__":
-    DATA_DIR = "data/mscoco"
-    MODEL_NAME = "4_layer_res13_attn1_lstm"
-    model_load_dir = os.path.join(DATA_DIR, MODEL_NAME)
+    args = parser.parse_args()
+    model_load_dir = os.path.join(DEFAULT_MODEL_DIR, args.model_name)
     PREDS_PATH = os.path.join(model_load_dir, "test_preds.txt")
+    ref_paths = []
+    for ref_fname in args.reference_files.split(","):
+        ref_paths.append(ref_fname.strip())
 
-    test_dir = os.path.join(DATA_DIR, "test_set")
-
-    with open(PREDS_PATH, "r") as f_preds:
-        hypotheses = [curr_hyp.strip() for curr_hyp in f_preds]
-
-    refs1 = [[] for _ in range(4)]
-    # convention: 0th reference is self-reference (if `include_self_ref` was set to True)
-    f_refs = [open(os.path.join(test_dir, f"test_ref{i}.txt")) for i in range(1, 5)]
-    for i, f_curr_ref in enumerate(f_refs):
-        for ref in f_curr_ref:
-            refs1[i].append(ref.strip())
-
-    for f in f_refs:
-        f.close()
-
-    refs2 = [[] for _ in range(5)]
-    f_refs = [open(os.path.join(test_dir, f"test_ref{i}.txt")) for i in range(0, 5)]
-    for i, f_curr_ref in enumerate(f_refs):
-        for ref in f_curr_ref:
-            refs2[i].append(ref.strip())
-
-    for f in f_refs:
-        f.close()
-
-    assert len(refs1[0]) == len(refs1[1]) == len(refs1[2]) == 20_000
-    assert len(refs2[0]) == len(refs2[1]) == len(refs2[2]) == len(refs2[3]) == 20_000
-
-    bleu_4refs = sacrebleu.corpus_bleu(hypotheses, refs1)
-    bleu_5refs = sacrebleu.corpus_bleu(hypotheses, refs2)
-
-    print(f"mscoco_test_set(), 4 refs, SacreBLEU: {bleu_4refs}")
-    print(f"mscoco_test_set(), 5 refs, SacreBLEU: {bleu_5refs}")
+    evaluator = Evaluator.from_files(hypotheses_path=PREDS_PATH, references_paths=ref_paths)
+    evaluator.run()
