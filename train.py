@@ -17,44 +17,62 @@ from util import encode_seq2seq, greedy_decode
 parser = argparse.ArgumentParser(description="Train a seq2seq model")
 parser.add_argument("--model_name", type=str, default=None)
 # TODO: enable using these
-parser.add_argument("--data_dir", type=str, required=True, default="data/mscoco",
+parser.add_argument("--data_dir", type=str, default="data/mscoco",
                     help="A directory where data (source and target sequences) and a vocab file are assumed to be.")
 # parser.add_argument("--vocab_file")
 
 parser.add_argument("--max_seq_len", type=int, default=20,
                     help="Max sequence length in number of tokens. <BOS> and <EOS> are included in this number.")
-parser.add_argument("--num_epochs", type=int, default=10)
-parser.add_argument("--batch_size", type=int, default=64)
+parser.add_argument("--num_epochs", type=int, default=50)
+parser.add_argument("--batch_size", type=int, default=4)
 
 parser.add_argument("--log_every_n_batches", type=int, default=100)
 parser.add_argument("--tf_proba_train", type=float, default=1.0,
                     help="Probability of using teacher forcing when training model on a batch.")
-parser.add_argument("--tf_proba_dev", type=float, default=0.0,
+parser.add_argument("--tf_proba_dev", type=float, default=1.0,
                     help="Probability of using teacher forcing when validating model on a batch.")
 parser.add_argument("--num_layers", type=int, default=4)
-parser.add_argument("--residual_layers", type=str, default=None,
+parser.add_argument("--residual_layers", type=str, default="1",
                     help="Comma-separated 0-based indices of layers, after which a residual connection is applied.")
 parser.add_argument("--residual_n", type=int, default=1,
                     help="Input from how many layers back should be added in residual connection. "
                          "E.g. residual_n=1 means input of current layer gets added to the output of layer")
 # TODO: separate encoder input and hidden size and perform dimensionality checks internally
-parser.add_argument("--enc_inp_hid_size", type=int, default=512,
+parser.add_argument("--enc_inp_hid_size", type=int, default=5,
                     help="Input and hidden state size of the encoder model.")
-parser.add_argument("--dec_inp_size", type=int, default=512)
-parser.add_argument("--dec_hid_size", type=int, default=512)
+parser.add_argument("--dec_inp_size", type=int, default=5)
+parser.add_argument("--dec_hid_size", type=int, default=5)
 parser.add_argument("--dropout", type=float, default=0.6)
 parser.add_argument("--enc_bidirectional", action="store_true")
-parser.add_argument("--dec_attn_layers", type=int, default=1,
+parser.add_argument("--dec_attn_layers", type=int, default=0,
                     help="Number of attention layers used when decoding. Supported values are None (no attention), "
                          "1 (same attention layer is used for all encoder layers) and num_layers (one attention layer "
                          "per encoder layer)")
-parser.add_argument("--early_stopping_rounds", type=int, default=1)
+parser.add_argument("--early_stopping_rounds", type=int, default=3)
 
 train_logger = logging.getLogger()
 train_logger.setLevel(logging.INFO)
 DEFAULT_MODEL_DIR = "models/"
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 logging.info(f"Using device {DEVICE}")
+
+
+def prepare_pretrained(path_to_embeddings, embedding_dim, vocab):
+    embeddings = torch.randn((len(vocab), embedding_dim), dtype=torch.float32)
+    embeddings[vocab["<PAD>"], :] = 0.0
+    with open(path_to_embeddings, "r") as f:
+        for line in f:
+            parts = line.strip().split(" ")
+            token = parts[0]
+            vector = list(map(lambda s: float(s), parts[1:]))
+            if token in vocab:
+                embeddings[vocab[token], :] = torch.tensor(vector)
+
+    norms = embeddings.norm(dim=1).unsqueeze(1)
+    norms[norms == 0.0] = 1.0
+    embeddings /= embeddings.norm(dim=1).unsqueeze(1)
+
+    return embeddings
 
 
 class PerplexityLoss(nn.CrossEntropyLoss):
@@ -70,9 +88,9 @@ class PerplexityLoss(nn.CrossEntropyLoss):
 
 class Trainer:
     def __init__(self, vocab, max_seq_len, num_epochs, batch_size, tf_proba_train, num_layers,
-                 enc_inp_hid_size, dec_inp_size, dec_hid_size, dropout, enc_bidirectional, dec_attn_layers,
+                 enc_inp_size, enc_hid_size, dec_inp_size, dec_hid_size, dropout, enc_bidirectional, dec_attn_layers,
                  model_name=None, tf_proba_dev=0.0, residual_layers=None, residual_n=1, early_stopping_rounds=1,
-                 log_every_n_batches=100):
+                 log_every_n_batches=100, pretrained_embs_path=None):
         self.model_name = datetime.now().strftime('%Y-%m-%dT%H:%M:%S') if model_name is None else model_name
         self.model_save_dir = os.path.join(DEFAULT_MODEL_DIR, self.model_name)
         print(f"Saving model details into '{self.model_save_dir}'")
@@ -89,7 +107,8 @@ class Trainer:
         self.num_layers = num_layers
         self.residual_layers = residual_layers if residual_layers is not None else []
         self.residual_n = residual_n
-        self.enc_inp_hid_size = enc_inp_hid_size
+        self.enc_inp_size = enc_inp_size
+        self.enc_hid_size = enc_hid_size
         self.dec_inp_size = dec_inp_size
         self.dec_hid_size = dec_hid_size
         self.dropout = dropout
@@ -110,20 +129,27 @@ class Trainer:
             if attr_name not in SKIP_CONFIG:
                 logging.info(f"\t{attr_name} = {attr_value}")
 
+        pretrained_embs = None
+        if pretrained_embs_path is not None:
+            pretrained_embs = prepare_pretrained(pretrained_embs_path, embedding_dim=self.enc_inp_size, vocab=vocab)
+
         self.enc_model = ResidualLSTMEncoder(vocab_size=len(self.tok2id),
-                                             num_layers=self.num_layers, residual_layers=self.residual_layers,
-                                             residual_n=residual_n, inp_hid_size=self.enc_inp_hid_size,
-                                             dropout=self.dropout, bidirectional=self.enc_bidirectional).to(DEVICE)
+                                             num_layers=self.num_layers,
+                                             residual_layers=self.residual_layers,
+                                             residual_n=residual_n,
+                                             input_size=self.enc_inp_size,
+                                             hidden_size=self.enc_hid_size,
+                                             dropout=self.dropout,
+                                             bidirectional=self.enc_bidirectional,
+                                             pretrained_embs=pretrained_embs).to(DEVICE)
         self.dec_model = ResidualLSTMDecoder(vocab_size=len(self.tok2id),
                                              num_layers=self.num_layers, residual_layers=self.residual_layers,
                                              residual_n=residual_n, inp_size=self.dec_inp_size, hid_size=self.dec_hid_size,
                                              dropout=self.dropout, num_attn_layers=self.dec_attn_layers).to(DEVICE)
 
-        self.enc_optimizer = optim.SGD(self.enc_model.parameters(), lr=1.0)
-        self.dec_optimizer = optim.SGD(self.dec_model.parameters(), lr=1.0)
-        self.enc_scheduler = optim.lr_scheduler.StepLR(self.enc_optimizer, step_size=3, gamma=0.5)
-        self.dec_scheduler = optim.lr_scheduler.StepLR(self.dec_optimizer, step_size=3, gamma=0.5)
-        self.loss_fn = PerplexityLoss(ignore_index=self.tok2id["<PAD>"])
+        self.optimizer = optim.SGD(list(self.enc_model.parameters()) + list(self.dec_model.parameters()), lr=1.0)
+        self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=3, gamma=0.5)
+        self.loss_fn = nn.CrossEntropyLoss(ignore_index=self.tok2id["<PAD>"])
 
         self.id2tok = {}
         for token, idx in self.tok2id.items():
@@ -137,13 +163,12 @@ class Trainer:
         fh = logging.FileHandler(os.path.join(self.model_save_dir, 'train_log.info'))
         train_logger.addHandler(fh)
 
-    def _process_batch(self, src, tgt, eval_mode=False):
-        self.enc_optimizer.zero_grad()
-        self.dec_optimizer.zero_grad()
+    def _process_batch(self, src, tgt, src_lens=None, tgt_lens=None, eval_mode=False):
+        self.optimizer.zero_grad()
 
         curr_batch_size = src.shape[0]
         # Encoder pass
-        last_lay_hids, (last_t_hids, last_t_cells) = self.enc_model(src)
+        last_lay_hids, (last_t_hids, last_t_cells) = self.enc_model(src, src_lens)
 
         curr_input = torch.tensor([[self.tok2id["<BOS>"]] for _ in range(curr_batch_size)],
                                   dtype=torch.long, device=DEVICE)
@@ -172,37 +197,37 @@ class Trainer:
             batch_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.enc_model.parameters(), 1.0)
             torch.nn.utils.clip_grad_norm_(self.dec_model.parameters(), 1.0)
-            self.enc_optimizer.step()
-            self.dec_optimizer.step()
+            self.optimizer.step()
 
         return float(batch_loss)
 
-    def train(self, train_src, train_tgt):
+    def train(self, train_src, train_tgt, tr_src_lens=None, tr_tgt_lens=None):
         num_train_batches = (train_src.shape[0] + self.batch_size - 1) // self.batch_size
         num_batches_considered, train_loss = 0, 0.0
         shuffle_idx = torch.randperm(num_train_batches).to(DEVICE)
 
         self.enc_model.train()
         self.dec_model.train()
-        for idx_batch in shuffle_idx:
+        for i, idx_batch in enumerate(shuffle_idx):
             start, end = idx_batch * self.batch_size, (idx_batch + 1) * self.batch_size
             curr_src = train_src[start: end].to(DEVICE)
             curr_tgt = train_tgt[start: end].to(DEVICE)
             curr_batch_size = curr_src.shape[0]  # in case of partial batches
             num_batches_considered += curr_batch_size / self.batch_size
 
-            train_loss += self._process_batch(curr_src, curr_tgt)
+            train_loss += self._process_batch(curr_src, curr_tgt,
+                                              tr_src_lens[start: end],
+                                              tr_tgt_lens[start: end])
 
-            if (1 + idx_batch) % self.log_every_n_batches == 0:
-                train_logger.info(f"Batch #{1 + idx_batch}: train_loss={train_loss / num_batches_considered:.4f}")
+            if (1 + i) % self.log_every_n_batches == 0:
+                train_logger.info(f"Batch #{1 + i}: train_loss={train_loss / num_batches_considered:.4f}")
 
         train_logger.info(f"Train_loss={train_loss / num_batches_considered:.4f}")
-        self.enc_scheduler.step()
-        self.dec_scheduler.step()
+        self.scheduler.step()
 
         return train_loss / num_batches_considered
 
-    def validate(self, dev_src, dev_tgt):
+    def validate(self, dev_src, dev_tgt, dev_src_lens=None, dev_tgt_lens=None):
         num_dev_batches = (dev_src.shape[0] + self.batch_size - 1) // self.batch_size
         dev_loss, dev_batches_considered = 0.0, 0
         with torch.no_grad():
@@ -215,23 +240,26 @@ class Trainer:
                 curr_batch_size = curr_src.shape[0]  # in case of partial batches
                 dev_batches_considered += curr_batch_size / self.batch_size
 
-                dev_loss += self._process_batch(curr_src, curr_tgt, eval_mode=True)
+                dev_loss += self._process_batch(curr_src, curr_tgt,
+                                                dev_src_lens[start: end],
+                                                dev_tgt_lens[start: end],
+                                                eval_mode=True)
 
         train_logger.info(f"Dev_loss={dev_loss / dev_batches_considered:.4f}")
         return dev_loss / dev_batches_considered
 
-    def run(self, train_src, train_tgt, dev_src=None, dev_tgt=None):
+    def run(self, train_src, train_tgt, tr_src_lens=None, tr_tgt_lens=None,
+            dev_src=None, dev_src_lens=None, dev_tgt=None, dev_tgt_lens=None):
         best_dev_loss, best_epoch = float("inf"), None
 
         t_start = time()
         for idx_epoch in range(self.num_epochs):
             train_logger.info(f"Epoch {1 + idx_epoch}")
-            log_lr(1 + idx_epoch, self.enc_optimizer, self.dec_optimizer)
 
-            self.train(train_src, train_tgt)
+            self.train(train_src, train_tgt, tr_src_lens=tr_src_lens, tr_tgt_lens=tr_tgt_lens)
             if dev_src is not None and dev_tgt is not None:
                 # Save best state according to validation metric
-                avg_dev_loss = self.validate(dev_src, dev_tgt)
+                avg_dev_loss = self.validate(dev_src, dev_tgt, dev_src_lens=dev_src_lens, dev_tgt_lens=dev_tgt_lens)
                 if avg_dev_loss < best_dev_loss:
                     train_logger.info(f"Saving new best model state to '{self.model_save_dir}'")
                     best_dev_loss, best_epoch = avg_dev_loss, idx_epoch
@@ -262,7 +290,7 @@ if __name__ == "__main__":
     DATA_DIR = args.data_dir
     parsed_residual_layers = None
     # Turn comma-separated layer indices into a list
-    if args.residual_layers is not None:
+    if args.residual_layers:
         parsed_residual_layers = list(map(int, args.residual_layers.split(",")))
         for layer_id in parsed_residual_layers:
             if layer_id >= args.num_layers:
@@ -272,9 +300,9 @@ if __name__ == "__main__":
 
     torch.manual_seed(1)
     raw_train_set = load_pairs(src_path=os.path.join(DATA_DIR, "train_set", "train_src.txt"),
-                               tgt_path=os.path.join(DATA_DIR, "train_set", "train_dst.txt"))
+                               tgt_path=os.path.join(DATA_DIR, "train_set", "train_dst.txt"))[: 1_000]
     raw_dev_set = load_pairs(src_path=os.path.join(DATA_DIR, "dev_set", "dev_src.txt"),
-                             tgt_path=os.path.join(DATA_DIR, "dev_set", "dev_dst.txt"))
+                             tgt_path=os.path.join(DATA_DIR, "dev_set", "dev_dst.txt"))[: 200]
     tok2id, id2tok = load_vocab(os.path.join(DATA_DIR, "vocab.txt"))
     train_logger.info(f"{len(raw_train_set)} train examples, {len(raw_dev_set)} dev examples, vocab = {len(tok2id)} tokens")
     trainer = Trainer(model_name=args.model_name,
@@ -286,7 +314,8 @@ if __name__ == "__main__":
                       num_layers=args.num_layers,
                       residual_layers=args.residual_layers,
                       residual_n=args.residual_n,
-                      enc_inp_hid_size=args.enc_inp_hid_size,
+                      enc_inp_size=300,  # TODO: custom based on used pretrained vectors/nothing
+                      enc_hid_size=args.enc_inp_hid_size,
                       dec_inp_size=args.dec_inp_size,
                       dec_hid_size=args.dec_hid_size,
                       dropout=args.dropout,
@@ -294,9 +323,11 @@ if __name__ == "__main__":
                       dec_attn_layers=args.dec_attn_layers,
                       vocab=tok2id,  # TODO: add support for CLI use
                       log_every_n_batches=args.log_every_n_batches,
-                      early_stopping_rounds=args.early_stopping_rounds)
+                      early_stopping_rounds=args.early_stopping_rounds,
+                      pretrained_embs_path="data/glove.6B.300d.txt")
 
-    train_input, train_target = encode_seq2seq(raw_train_set, tok2id, args.max_seq_len)
-    dev_input, dev_target = encode_seq2seq(raw_dev_set, tok2id, args.max_seq_len)
+    train_input, tr_src_lens, train_target, tr_tgt_lens = encode_seq2seq(raw_train_set, tok2id, args.max_seq_len)
+    dev_input, dev_src_lens, dev_target, dev_tgt_lens = encode_seq2seq(raw_dev_set, tok2id, args.max_seq_len)
 
-    trainer.run(train_input, train_target, dev_src=dev_input, dev_tgt=dev_target)
+    trainer.run(train_input, train_target, tr_src_lens=tr_src_lens, tr_tgt_lens=tr_tgt_lens,
+                dev_src=dev_input, dev_tgt=dev_target, dev_src_lens=dev_src_lens, dev_tgt_lens=dev_tgt_lens)
