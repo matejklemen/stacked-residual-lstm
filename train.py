@@ -49,6 +49,7 @@ parser.add_argument("--dec_attn_layers", type=int, default=0,
                          "1 (same attention layer is used for all encoder layers) and num_layers (one attention layer "
                          "per encoder layer)")
 parser.add_argument("--early_stopping_rounds", type=int, default=3)
+parser.add_argument("--pretrained_embeddings", type=str, default="data/glove.6B.300d.txt")
 
 train_logger = logging.getLogger()
 train_logger.setLevel(logging.INFO)
@@ -324,7 +325,7 @@ if __name__ == "__main__":
                       vocab=tok2id,  # TODO: add support for CLI use
                       log_every_n_batches=args.log_every_n_batches,
                       early_stopping_rounds=args.early_stopping_rounds,
-                      pretrained_embs_path="data/glove.6B.300d.txt")
+                      pretrained_embs_path=args.pretrained_embeddings)
 
     train_input, tr_src_lens, train_target, tr_tgt_lens = encode_seq2seq(raw_train_set, tok2id, args.max_seq_len)
     dev_input, dev_src_lens, dev_target, dev_tgt_lens = encode_seq2seq(raw_dev_set, tok2id, args.max_seq_len)
