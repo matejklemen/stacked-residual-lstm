@@ -300,9 +300,9 @@ if __name__ == "__main__":
 
     torch.manual_seed(1)
     raw_train_set = load_pairs(src_path=os.path.join(DATA_DIR, "train_set", "train_src.txt"),
-                               tgt_path=os.path.join(DATA_DIR, "train_set", "train_dst.txt"))[: 1_000]
+                               tgt_path=os.path.join(DATA_DIR, "train_set", "train_dst.txt"))#[: 1_000]
     raw_dev_set = load_pairs(src_path=os.path.join(DATA_DIR, "dev_set", "dev_src.txt"),
-                             tgt_path=os.path.join(DATA_DIR, "dev_set", "dev_dst.txt"))[: 200]
+                             tgt_path=os.path.join(DATA_DIR, "dev_set", "dev_dst.txt"))#[: 200]
     tok2id, id2tok = load_vocab(os.path.join(DATA_DIR, "vocab.txt"))
     train_logger.info(f"{len(raw_train_set)} train examples, {len(raw_dev_set)} dev examples, vocab = {len(tok2id)} tokens")
     trainer = Trainer(model_name=args.model_name,
