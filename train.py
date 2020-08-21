@@ -217,8 +217,8 @@ class Trainer:
             num_batches_considered += curr_batch_size / self.batch_size
 
             train_loss += self._process_batch(curr_src, curr_tgt,
-                                              tr_src_lens[start: end],
-                                              tr_tgt_lens[start: end])
+                                              tr_src_lens[start: end].to(DEVICE),
+                                              tr_tgt_lens[start: end].to(DEVICE))
 
             if (1 + i) % self.log_every_n_batches == 0:
                 train_logger.info(f"Batch #{1 + i}: train_loss={train_loss / num_batches_considered:.4f}")
@@ -242,8 +242,8 @@ class Trainer:
                 dev_batches_considered += curr_batch_size / self.batch_size
 
                 dev_loss += self._process_batch(curr_src, curr_tgt,
-                                                dev_src_lens[start: end],
-                                                dev_tgt_lens[start: end],
+                                                dev_src_lens[start: end].to(DEVICE),
+                                                dev_tgt_lens[start: end].to(DEVICE),
                                                 eval_mode=True)
 
         train_logger.info(f"Dev_loss={dev_loss / dev_batches_considered:.4f}")
