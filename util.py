@@ -48,33 +48,34 @@ def encode_seq2seq(raw_set, forward_vocab, max_seq_len):
     >>> encode_seq2seq(pairs, vocab, max_seq_len=10)
     """
     source_target = len(raw_set[0]) == 2
-    encoded_source = []
+    encoded_source, source_lens = [], []
     if source_target:
-        encoded_target = []
+        encoded_target, target_lens = [], []
 
     for example in raw_set:
         # source: <BOS> + sequence + <EOS>
-        curr_src = example[0]
-        curr_src = pad([forward_vocab["<BOS>"]] +
-                       trim(encode_sequence(curr_src, forward_vocab), max_seq_len - 2) +
-                       [forward_vocab["<EOS>"]],
+        curr_src = trim(encode_sequence(example[0], forward_vocab), max_seq_len - 2)
+        source_lens.append(len(curr_src) + 2)
+        curr_src = pad([forward_vocab["<BOS>"]] + curr_src + [forward_vocab["<EOS>"]],
                        max_len=max_seq_len, pad_token=forward_vocab["<PAD>"])
         encoded_source.append(curr_src)
 
         # target: sequence + <EOS>
         if source_target:
-            curr_tgt = example[1]
-            curr_tgt = pad(trim(encode_sequence(curr_tgt, forward_vocab), max_seq_len - 1) +
-                           [forward_vocab["<EOS>"]],
+            curr_tgt = trim(encode_sequence(example[1], forward_vocab), max_seq_len - 1)
+            target_lens.append(len(curr_tgt) + 1)
+            curr_tgt = pad(curr_tgt + [forward_vocab["<EOS>"]],
                            max_len=max_seq_len, pad_token=forward_vocab["<PAD>"])
             encoded_target.append(curr_tgt)
 
     encoded_source = torch.tensor(encoded_source, dtype=torch.long)
+    source_lens = torch.tensor(source_lens, dtype=torch.long)
     if source_target:
         encoded_target = torch.tensor(encoded_target, dtype=torch.long)
-        return encoded_source, encoded_target
+        target_lens = torch.tensor(target_lens, dtype=torch.long)
+        return encoded_source, source_lens, encoded_target, target_lens
     else:
-        return encoded_source
+        return encoded_source, source_lens
 
 
 def greedy_decode(logits):
