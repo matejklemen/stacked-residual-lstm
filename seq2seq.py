@@ -28,11 +28,12 @@ class ResidualLSTMEncoder(nn.Module):
         self.num_layers = num_layers
         self.dropout = nn.Dropout(p=dropout)
         if pretrained_embs is not None:
-            self.embeddings = nn.Embedding.from_pretrained(pretrained_embs, padding_idx=padding_idx)
+            self.embeddings = nn.Embedding.from_pretrained(pretrained_embs,
+                                                           padding_idx=padding_idx)
         else:
             self.embeddings = nn.Embedding(num_embeddings=vocab_size,
                                            embedding_dim=self.input_size,
-                                           padding_idx=self.padding_idx)
+                                           padding_idx=padding_idx)
         self.layers = []
         for idx_layer in range(num_layers):
             # Input to first LSTM are word embeddings, while input to other LSTMs are previous layer's hidden states
@@ -107,7 +108,7 @@ class ResidualLSTMEncoder(nn.Module):
 
 class ResidualLSTMDecoder(nn.Module):
     def __init__(self, vocab_size, num_layers, residual_layers,
-                 inp_size, hid_size, dropout=0.0, num_attn_layers=1, residual_n=1):
+                 inp_size, hid_size, dropout=0.0, num_attn_layers=1, residual_n=1, pretrained_embs=None, padding_idx=0):
         super().__init__()
 
         self.is_res = np.zeros(num_layers, dtype=bool)
@@ -116,6 +117,8 @@ class ResidualLSTMDecoder(nn.Module):
                 self.is_res[layer_id] = True
         self.residual_n = residual_n
 
+        self.input_size = inp_size
+        self.hidden_size = hid_size
         self.num_layers = num_layers
         self.dropout = nn.Dropout(p=dropout)
         self.embeddings = nn.Embedding(num_embeddings=vocab_size,
@@ -134,11 +137,25 @@ class ResidualLSTMDecoder(nn.Module):
             raise ValueError(f"Valid options for 'num_attn_layers': 0 or 1")
         self.num_attn_layers = num_attn_layers
 
-        # LSTMs will get 2 things as input (IF using attention):
-        # [attended encoder states, embedded decoder input/hidden state] (concatenated)
-        self.layers = nn.ModuleList([nn.LSTM(input_size=(inp_size + hid_size) if num_attn_layers > 0 else inp_size,
-                                             hidden_size=hid_size,
-                                             batch_first=True) for _ in range(num_layers)])
+        if pretrained_embs is not None:
+            self.embeddings = nn.Embedding.from_pretrained(pretrained_embs,
+                                                           padding_idx=padding_idx)
+        else:
+            self.embeddings = nn.Embedding(num_embeddings=vocab_size,
+                                           embedding_dim=self.input_size,
+                                           padding_idx=padding_idx)
+        self.layers = []
+        for idx_layer in range(num_layers):
+            # TODO need to decide how I'll do attention here (use attended hidden states after every layer or just after last?)
+            # LSTMs will get 2 things as input (IF using attention):
+            # [attended encoder states, embedded decoder input/hidden state] (concatenated)
+            # TODO end
+            # Input to first LSTM are word embeddings, while input to other LSTMs are previous layer's hidden states
+            curr_lstm_inp_size = self.input_size if idx_layer == 0 else self.hidden_size
+            self.layers.append(nn.LSTM(input_size=curr_lstm_inp_size,
+                                       hidden_size=self.hidden_size,
+                                       batch_first=True))
+        self.layers = nn.ModuleList(self.layers)
         self.fc = nn.Linear(hid_size, vocab_size)
 
     def forward(self, encoded_input, enc_hidden,
@@ -172,6 +189,11 @@ class ResidualLSTMDecoder(nn.Module):
                 take_input_from = i - self.residual_n + 1
                 if take_input_from >= 0:
                     identity = inputs_to_layers[take_input_from]
+                    # If residue vector is smaller, pad it, otherwise truncate it
+                    if identity.shape[-1] < curr_out.shape[-1]:
+                        identity = F.pad(identity, pad=[0, curr_out.shape[-1] - identity.shape[-1]])
+                    else:
+                        identity = identity[..., :curr_out.shape[-1]]
                 else:
                     # e.g. there is no input from 5 layers back when we are at point after layer 0
                     # (the only input that could be added in this case is the input embeddings)

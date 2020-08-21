@@ -38,10 +38,10 @@ parser.add_argument("--residual_n", type=int, default=1,
                     help="Input from how many layers back should be added in residual connection. "
                          "E.g. residual_n=1 means input of current layer gets added to the output of layer")
 # TODO: separate encoder input and hidden size and perform dimensionality checks internally
-parser.add_argument("--enc_inp_hid_size", type=int, default=5,
+parser.add_argument("--enc_inp_hid_size", type=int, default=512,
                     help="Input and hidden state size of the encoder model.")
-parser.add_argument("--dec_inp_size", type=int, default=5)
-parser.add_argument("--dec_hid_size", type=int, default=5)
+parser.add_argument("--dec_inp_size", type=int, default=512)
+parser.add_argument("--dec_hid_size", type=int, default=512)
 parser.add_argument("--dropout", type=float, default=0.6)
 parser.add_argument("--enc_bidirectional", action="store_true")
 parser.add_argument("--dec_attn_layers", type=int, default=0,
@@ -70,8 +70,8 @@ def prepare_pretrained(path_to_embeddings, embedding_dim, vocab):
                 embeddings[vocab[token], :] = torch.tensor(vector)
 
     norms = embeddings.norm(dim=1).unsqueeze(1)
-    norms[norms == 0.0] = 1.0
-    embeddings /= embeddings.norm(dim=1).unsqueeze(1)
+    norms[vocab["<PAD>"], :] = 1.0
+    embeddings /= norms
 
     return embeddings
 
@@ -144,9 +144,14 @@ class Trainer:
                                              bidirectional=self.enc_bidirectional,
                                              pretrained_embs=pretrained_embs).to(DEVICE)
         self.dec_model = ResidualLSTMDecoder(vocab_size=len(self.tok2id),
-                                             num_layers=self.num_layers, residual_layers=self.residual_layers,
-                                             residual_n=residual_n, inp_size=self.dec_inp_size, hid_size=self.dec_hid_size,
-                                             dropout=self.dropout, num_attn_layers=self.dec_attn_layers).to(DEVICE)
+                                             num_layers=self.num_layers,
+                                             residual_layers=self.residual_layers,
+                                             residual_n=residual_n,
+                                             inp_size=self.dec_inp_size,
+                                             hid_size=self.dec_hid_size,
+                                             dropout=self.dropout,
+                                             num_attn_layers=self.dec_attn_layers,
+                                             pretrained_embs=pretrained_embs).to(DEVICE)
 
         self.optimizer = optim.SGD(list(self.enc_model.parameters()) + list(self.dec_model.parameters()), lr=1.0)
         self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=3, gamma=0.5)
@@ -315,9 +320,9 @@ if __name__ == "__main__":
                       num_layers=args.num_layers,
                       residual_layers=args.residual_layers,
                       residual_n=args.residual_n,
-                      enc_inp_size=300,  # TODO: custom based on used pretrained vectors/nothing
+                      enc_inp_size=300,  # TODO: allow custom
                       enc_hid_size=args.enc_inp_hid_size,
-                      dec_inp_size=args.dec_inp_size,
+                      dec_inp_size=300,  # TODO: allow custom
                       dec_hid_size=args.dec_hid_size,
                       dropout=args.dropout,
                       enc_bidirectional=args.enc_bidirectional,
